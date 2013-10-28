@@ -28,7 +28,8 @@ sub Usage
     print "  -t, --test             list out the action without committing any changes\n";
     print "  -d, --dir directory    specify the root of home, like /User,/home...\n";
     print "  -h, --help             display this message\n";
-    exit;
+    
+    $help?exit 0:exit 1;
 }
 
 #This function would return legal users from the array we pass in , whose home directory could be fixed,
@@ -111,9 +112,10 @@ sub FixHome
             chomp ($new_gid=`id -g $user`);
             $prev_uid = (stat("$home_path"))[4];
             $prev_gid = (stat("$home_path"))[5];
+            next if($new_uid==$prev_uid && $new_gid==$prev_gid);
             printf("%-15s %-30s ",$user,$home_path);
             printf("%-30s ",$prev_uid.'=>'.$new_uid);
-            printf("%-30s",$prev_gid.'=>'.$new_uid) unless($uidonly);
+            printf("%-30s",$prev_gid.'=>'.$new_gid) unless($uidonly);
             print "\n";
         }
         print "\n\n";
@@ -268,7 +270,7 @@ if(@include)
           "Please check if you type the right name.\n\n" if(@nouser);
     print "<Warning> Users:\t".join("\n\t\t",@nohome)." got no home under $HomeRoot, ".
           "will skip this user while fixing.\n\n" if(@nohome);
-    exit 1 if(@nouser);
+    Usage() if(@nouser);
     FixHome(@targets);
 }
 elsif(@exclude)
