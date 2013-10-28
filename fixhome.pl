@@ -77,8 +77,9 @@ sub GetAllUsers()
     my $new_uid;
     @nouser=();
     @nohome=();
-    foreach my $user (glob("*"))
+    foreach my $user (glob("$HomeRoot/*"))
     {
+        $user =~ s#$HomeRoot/##g;
         my $home_path = File::Spec->catfile($HomeRoot,$user);
         chomp $home_path;
         chomp $user;
@@ -146,9 +147,14 @@ sub FixHome
             next;
         }
         my %options = (
-            wanted              => sub { push(@files,$File::Find::name);},
+            wanted              => sub 
+                                   {
+                                    #skip the dangling symlink
+                                    -l && !-e && return;
+                                    push(@files,$File::Find::name);
+                                   },
             follow_fast         => $follow,
-            follow_skip         => 2,
+            follow_skip         => 2
         );
         #Search every files under the home, and keep them in array @files
         find(\%options,$home_path);
@@ -185,7 +191,7 @@ sub FixFiles($$$$$)
             #print "<symlink found> $file\n";
             # Fix the link itself and no traverse.
             ($file_uid,$file_gid) = (lstat($file))[4,5];
-            $chown." -h ";
+            $chown.=" -h ";
         }
 
         #print "<symlink found> $file\n" if( -l $file);
@@ -330,9 +336,6 @@ elsif(@exclude)
               "will skip this user while fixing.\n\n";
     }
 
-    print "Exclude Users: ",join(',',@extarget),"\n" if($test);
-    print "All Users: ",join(',',@alltargets),"\n" if($test);
-    
     #Calculate the Home need to be fixed and fix them all
     my @targets = ();
     my $i = 0;
