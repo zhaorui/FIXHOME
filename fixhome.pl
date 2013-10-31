@@ -11,7 +11,7 @@ my @nohome;     #list of user who don't have home directory, and contain the res
 my $HomeRoot;   #The Root of User's home directory, could be specified by -d option
 my @include=(); #list of include user by -i option
 my @exclude=(); #list of exclude user by -e option
-my $useronly=0; #value for -u option
+my $uidonly=0; #value for -u option
 my $test=0;     #value for -t option
 my $Link=0;     #value for -L option, traverse every symbolic link to a directory encounter
 my $help=0;     #value for -h opiton, display the useage of this script.
@@ -22,7 +22,7 @@ sub Usage
     print "option:\n";
     print "  -i, --include user...  only fix the the users we specify\n";
     print "  -e, --exclude user...  fix all the user except the users we specify\n";
-    print "  -u, --useronly         only fix the uid while fixing the home, keep gid original\n";
+    print "  -u, --uidonly          only fix the uid while fixing the home, keep gid original\n";
     print "  -L, --Link             traverse the symlink directory when we encounter one,\n";
     print "                         by default, this option is disable, we only modify the link itself\n";
     print "  -t, --test             list the fix action we gonna take, and don't make any change.\n";
@@ -198,7 +198,7 @@ sub FixFiles
 my $HomePath; # Temp variable to store the root directory of Home.
 GetOptions ('include=s{1,}' => \@include,
             'exclude=s{1,}' => \@exclude,
-            'useronly' => \$useronly,
+            'uidonly' => \$uidonly,
             'test' => \$test,
             'dir=s' => \$HomePath,
             'Link' => \$Link,
@@ -330,7 +330,7 @@ if($test)
     print "HomeRoot: ",$HomeRoot."\n";
     print "Include: ",join(',',@include),"\n";
     print "Exclude:",join(',',@exclude),"\n";
-    print "useronly: $useronly","\n";
+    print "uidonly: $uidonly","\n";
     print "test: $test \n";
     print "Link: $Link \n";
 }
