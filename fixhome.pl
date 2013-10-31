@@ -13,7 +13,7 @@ my @include=(); #list of include user by -i option
 my @exclude=(); #list of exclude user by -e option
 my $uidonly=0; #value for -u option
 my $test=0;     #value for -t option
-my $Link=0;     #value for -L option, traverse every symbolic link to a directory encounter
+my $follow=0;     #value for -L option, traverse every symbolic link to a directory encounter
 my $help=0;     #value for -h opiton, display the useage of this script.
 
 sub Usage
@@ -23,10 +23,10 @@ sub Usage
     print "  -i, --include user...  only fix the the users we specify\n";
     print "  -e, --exclude user...  fix all the user except the users we specify\n";
     print "  -u, --uidonly          only fix the uid while fixing the home, keep gid original\n";
-    print "  -L, --Link             traverse the symlink directory when we encounter one,\n";
-    print "                         by default, this option is disable, we only modify the link itself\n";
-    print "  -t, --test             list the fix action we gonna take, and don't make any change.\n";
-    print "  -d, --dir directory    specify the root of home, it's the dirname of a home, like /User,/home...\n";
+    print "  -f, --follow           traverse the symlink directory when encounter one,\n";
+    print "                         by default, this option is disable, only modify the link itself\n";
+    print "  -t, --test             list the fix action, and don't make any change.\n";
+    print "  -d, --dir directory    specify the root of home, it's the directory name of a home, like /User,/home...\n";
     print "  -h, --help             display this message\n";
     exit;
 }
@@ -124,7 +124,7 @@ sub FixHome
         #foreach my $file (`find $home_path`)   Cant's solve the space in filename issue
         my %options = (
             wanted      => sub { push(@files,$File::Find::name);},
-            follow      => $Link,
+            follow      => $follow,
             follow_skip => 2
         );
         #Search every files under the home, and keep them in array @files
@@ -146,7 +146,7 @@ sub FixFiles
         my $file_uid = (stat($file))[4];
         my $file_gid = (stat($file))[5];
 
-        if( -l $file and !$Link)
+        if( -l $file and !$follow)
         {
             #print "<symlink found> $file\n";
             # Fix the link itself and no traverse.
@@ -201,7 +201,7 @@ GetOptions ('include=s{1,}' => \@include,
             'uidonly' => \$uidonly,
             'test' => \$test,
             'dir=s' => \$HomePath,
-            'Link' => \$Link,
+            'follow' => \$follow,
             'help' => \$help)
 or die();
 
@@ -332,5 +332,5 @@ if($test)
     print "Exclude:",join(',',@exclude),"\n";
     print "uidonly: $uidonly","\n";
     print "test: $test \n";
-    print "Link: $Link \n";
+    print "follow: $follow\n";
 }
