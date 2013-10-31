@@ -13,7 +13,23 @@ my @include=(); #list of include user by -i option
 my @exclude=(); #list of exclude user by -e option
 my $useronly=0; #value for -u option
 my $test=0;     #value for -t option
-my $Link=0;     #value for -L option,traverse every symbolic link to a directory encounter
+my $Link=0;     #value for -L option, traverse every symbolic link to a directory encounter
+my $help=0;     #value for -h opiton, display the useage of this script.
+
+sub Usage
+{
+    print "usage: fixhome.pl [option]\n";
+    print "option:\n";
+    print "  -i, --include user...  only fix the the users we specify\n";
+    print "  -e, --exclude user...  fix all the user except the users we specify\n";
+    print "  -u, --useronly         only fix the uid while fixing the home, keep gid original\n";
+    print "  -L, --Link             traverse the symlink directory when we encounter one,\n";
+    print "                         by default, this option is disable, we only modify the link itself\n";
+    print "  -t, --test             list the fix action we gonna take, and don't make any change.\n";
+    print "  -d, --dir directory    specify the root of home, it's the dirname of a home, like /User,/home...\n";
+    print "  -h, --help             display this message\n";
+    exit;
+}
 
 #This function would return legal users from the array we pass in , whose home directory could be fixed,
 #and reset the global @nouser and @nohome;
@@ -65,7 +81,7 @@ sub GetAllUsers
         {
             push(@all_user,$user);
             #initialize the uid hash table.
-            $home_uid = (lstat($home_path))[4];
+            $home_uid = (stat($home_path))[4];
             chomp ($new_uid=`id -u $user`);
             $uidmap{$home_uid}=$new_uid if($home_uid!=$new_uid);
         }
@@ -100,8 +116,8 @@ sub FixHome
         $home_path = File::Spec->catfile($HomeRoot,$user);
         chomp ($new_uid=`id -u $user`);
         chomp ($new_gid=`id -g $user`);
-        $prev_uid = (lstat("$home_path"))[4];
-        $prev_gid = (lstat("$home_path"))[5];
+        $prev_uid = (stat("$home_path"))[4];
+        $prev_gid = (stat("$home_path"))[5];
         #Home's mode is correct, don't need to be fixed.
         next if($new_uid==$prev_uid && $new_gid==$prev_gid);
         print "Fix user's home: $home_path \n" if($test);
@@ -179,6 +195,18 @@ sub FixFiles
     }
 }
 
+my $HomePath; # Temp variable to store the root directory of Home.
+GetOptions ('include=s{1,}' => \@include,
+            'exclude=s{1,}' => \@exclude,
+            'useronly' => \$useronly,
+            'test' => \$test,
+            'dir=s' => \$HomePath,
+            'Link' => \$Link,
+            'help' => \$help)
+or die();
+
+Usage() if $help;
+
 # Test if we have root permission
 if ($> != 0)
 {
@@ -209,30 +237,21 @@ elsif($OSNAME eq "hpux")
 }
 else
 {
-    die "Current platform not support.";
+    die "This platform is not supported.";
 }
-
-my $HomePath; # Temp variable to store the root directory of Home.
-GetOptions ('include=s{1,}' => \@include,
-            'exclude=s{1,}' => \@exclude,
-            'useronly' => \$useronly,
-            'test' => \$test,
-            'dir=s' => \$HomePath,
-            'Link' => \$Link)
-or die();
 
 $HomePath?$HomeRoot=$HomePath
          :print "Use default directory \"$HomeRoot\" as the HomeRoot\n";
 
-until (-d $HomeRoot)
+unless (-d $HomeRoot)
 {
-    print"Directory $HomeRoot doesn't exist...\nplease enter the home root:\n";
-    chomp ($HomeRoot=<STDIN>);
+    die "Directory $HomeRoot doesn't exist...\n";
 }
+
 
 if(@include && @exclude)
 {
-    die "-i and -e couldn't appear in the same time\n";
+    die "-i and -e couldn't appear at the same time\n";
 }
 
 if(@include)
