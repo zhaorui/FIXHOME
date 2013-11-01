@@ -18,15 +18,15 @@ my $help=0;     #value for -h opiton, display the useage of this script.
 
 sub Usage
 {
-    print "usage: fixhome.pl [option]\n";
+    print "usage: fixhome.pl [-ufth] [-i|-e user ...] [-d path]\n";
     print "option:\n";
-    print "  -i, --include user...  only fix the the users we specify\n";
-    print "  -e, --exclude user...  fix all the user except the users we specify\n";
-    print "  -u, --uidonly          only fix the uid while fixing the home, keep gid original\n";
+    print "  -i, --include user ... only fix the the specified users\n";
+    print "  -e, --exclude user ... fix all the user except the specified users\n";
+    print "  -u, --uidonly          only fix the uid while fixing users home, keep gid original\n";
     print "  -f, --follow           traverse the symlink directory when encounter one,\n";
-    print "                         by default, this option is disable, only modify the link itself\n";
-    print "  -t, --test             list the fix action, and don't make any change.\n";
-    print "  -d, --dir directory    specify the root of home, it's the directory name of a home, like /User,/home...\n";
+    print "                         when it is disable, only modify the link itself\n";
+    print "  -t, --test             list out the action without committing any changes\n";
+    print "  -d, --dir directory    specify the root of home, like /User,/home...\n";
     print "  -h, --help             display this message\n";
     exit;
 }
@@ -59,7 +59,7 @@ sub FilterUsers
 
 
 #This function would return all the legal user who have home directory,
-#and empty the nohome array, and reset the nouser array.
+#and empty the nohome/nouser array, and reset the nouser array.
 #This function also would initialize the uidmap.
 sub GetAllUsers
 {
@@ -91,15 +91,13 @@ sub GetAllUsers
 
 
 #This function would fix User's home directory.
-# These value would used by FixHome and FixFile routine
-my $new_uid;    #user's new uid
-my $new_gid;    #user's new gid
-my $prev_uid;   #user's previous uid, assume it's the same with user's home uid
-my $prev_gid;   #user's previous gid, assume it's the same with user's home gid
-my @files;      #Array to store all the files under the home directory
-                #would be used in FixHome FixFiles routine
 sub FixHome
 {
+    my @files;      #Array to store all the files under the home directory
+    my $new_uid;    #user's new uid
+    my $new_gid;    #user's new gid
+    my $prev_uid;   #user's previous uid, assume it's the same with user's home uid
+    my $prev_gid;   #user's previous gid, assume it's the same with user's home gid
     my $home_path;
     print "Would Fix:",join(',',@_),"\n" if($test);
     #Display the uid map
@@ -129,7 +127,7 @@ sub FixHome
         );
         #Search every files under the home, and keep them in array @files
         find(\%options,$home_path);
-        FixFiles();
+        FixFiles($new_uid,$new_gid,$prev_uid,$prev_gid,\@files);
         @files=();
         print "\n\n" if($test);
     }
@@ -138,6 +136,8 @@ sub FixHome
 #Used for Travserse the direcory recursively
 sub FixFiles
 {
+    my ($new_uid,$new_gid,$prev_uid,$prev_gid) = @_;
+    my @files = @{$_[4]};
     foreach my $file (@files)
     {
         chomp $file;
@@ -214,7 +214,7 @@ if ($> != 0)
 }
 
 # Detect the running platform and initilize
-print "Detect running on $OSNAME...\n\n";
+print "Detect running on $OSNAME...\n\n" if $test;
 if($OSNAME eq "darwin")
 {
     $HomeRoot="/Users";
@@ -241,60 +241,54 @@ else
 }
 
 $HomePath?$HomeRoot=$HomePath
-         :print "Use default directory \"$HomeRoot\" as the HomeRoot\n";
+         :print "Use default directory \"$HomeRoot\" as the HomeRoot\n\n";
 
 unless (-d $HomeRoot)
 {
-    die "Directory $HomeRoot doesn't exist...\n";
+    print "Directory $HomeRoot doesn't exist...\n\n";
+    Usage();
 }
 
 
 if(@include && @exclude)
 {
-    die "-i and -e couldn't appear at the same time\n";
+    print "-i and -e couldn't appear at the same time\n\n";
+    Usage();
 }
 
 if(@include)
 {
     #initilize the the uidmap;
     GetAllUsers();
-    my $yn;
     my @targets = FilterUsers(@include);
-    print "Users: @nouser could not found in the system\n" if(@nouser);
-    print "Users: @nohome got no home under $HomeRoot \n" if(@nohome);
-    if(@nouser || @nohome)
-    {
-        print "Do you want to continue to fix the home, without these users?[y/n]";
-        chomp ($yn=<STDIN>);
-        die "Script Terminated." if(($yn eq "n") or($yn eq "N"))
-    }
+    print "<Error> Users:\t".join("\n\t\t",@nouser)."\ncould not found in the system, ".
+          "Please check if you type the right name.\n\n" if(@nouser);
+    print "<Warning> Users:\t".join("\n\t\t",@nohome)." got no home under $HomeRoot, ".
+          "will skip this user while fixing.\n\n" if(@nohome);
+    exit 1 if(@nouser);
     FixHome(@targets);
 }
 elsif(@exclude)
 {
-    my $yn;
     my @extarget = FilterUsers(@exclude);
+    print "<Warning> User:\t".join("\n\t\t",@nouser)."\ncould not found in the system, ".
+          "will skip this user while fixing.\n\n" if(@nouser);
+    print "<Warning> User:\t".join("\n\t\t",@nohome)."\ngot no home under $HomeRoot, ".
+          "will skip this user while fixing.\n\n" if(@nohome);
+
     my @alltargets = GetAllUsers();
+    foreach my $user (@exclude){
+        @nouser = grep !/$user/,@nouser;
+    }
+    print "<Warning> Home:\t".join("\n\t\t",@nouser)."\nwill not be fixed, could not ".
+          "find their owner.\n\n";
+
     print "Exclude Users: ",join(',',@extarget),"\n" if($test);
     print "All Users: ",join(',',@alltargets),"\n" if($test);
-    if(@nouser)
-    {
-        print "Won't Fix These Users: @nouser \n CAN'T be found in the system.\n";
-        print "Do you want to continue to fix the home, without these users?[y/n]";
-        chomp ($yn=<STDIN>);
-        die "Script Terminated." if(($yn eq "n") or($yn eq "N"))
-    }
+    
     my @targets = ();
     my $i = 0;
     my $j = 0;
-   #This way may be better.
-   # foreach my $t (@alltargets)
-   # {
-   #     unless(grep {/^$t$/} @extarget)
-   #     {
-   #         push(@targets,$t);
-   #     }
-   # }
     while($i<@alltargets && $j<@extarget)
     {
         if($alltargets[$i] eq $extarget[$j])
