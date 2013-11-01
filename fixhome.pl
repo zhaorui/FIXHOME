@@ -103,11 +103,21 @@ sub FixHome
     #Display the uid map
     if($test)
     {
-        print "\nThe uidmap:\n";
-        while(my ($key,$value) = each %uidmap){
-            print "$key => $value\n";
+        printf("%-15s %-30s %-30s %-30s\n",'User','Home','UID Map','GID Map');
+        foreach my $user (@_)
+        {
+            $home_path = File::Spec->catfile($HomeRoot,$user);
+            chomp ($new_uid=`id -u $user`);
+            chomp ($new_gid=`id -g $user`);
+            $prev_uid = (stat("$home_path"))[4];
+            $prev_gid = (stat("$home_path"))[5];
+            printf("%-15s %-30s ",$user,$home_path);
+            printf("%-30s ",$prev_uid.'=>'.$new_uid);
+            printf("%-30s",$prev_gid.'=>'.$new_uid) unless($uidonly);
+            print "\n";
         }
         print "\n\n";
+        return;
     }
     foreach my $user (@_)
     {
@@ -118,8 +128,6 @@ sub FixHome
         $prev_gid = (stat("$home_path"))[5];
         #Home's mode is correct, don't need to be fixed.
         next if($new_uid==$prev_uid && $new_gid==$prev_gid);
-        print "Fix user's home: $home_path \n" if($test);
-        #foreach my $file (`find $home_path`)   Cant's solve the space in filename issue
         my %options = (
             wanted      => sub { push(@files,$File::Find::name);},
             follow      => $follow,
@@ -129,7 +137,6 @@ sub FixHome
         find(\%options,$home_path);
         FixFiles($new_uid,$new_gid,$prev_uid,$prev_gid,\@files);
         @files=();
-        print "\n\n" if($test);
     }
 }
 
@@ -154,20 +161,18 @@ sub FixFiles
             $file_gid = (lstat($file))[5];
             if($prev_uid==$file_uid && $prev_gid==$file_gid)
             {
-                $test?print "chown -h $new_uid:$new_gid $file\n"
-                     :system "chown -h $new_uid:$new_gid $filename";
+                $uidonly?system "chown -h $new_uid $filename"
+                        :system "chown -h $new_uid:$new_gid $filename";
             }
             else
             {
                 if(exists $uidmap{$file_uid})
                 {
-                    $test?print "chown -h $uidmap{$file_uid} $file\n"
-                         :system "chown -h $uidmap{$file_uid} $filename";
+                    system "chown -h $uidmap{$file_uid} $filename";
                 }
                 if($prev_gid==$file_gid)
                 {
-                    $test?print "chown -h :$new_gid $file\n"
-                         :system "chown -h :$new_gid $filename";
+                    system "chown -h :$new_gid $filename" unless($uidonly);
                 }
             }
         }
@@ -175,20 +180,18 @@ sub FixFiles
         {
            if($prev_uid==$file_uid && $prev_gid==$file_gid)
             {
-                $test?print "chown $new_uid:$new_gid $file\n"
-                     :system "chown $new_uid:$new_gid $filename";
+                $uidonly?system "chown $new_uid $filename"
+                        :system "chown $new_uid:$new_gid $filename";
             }
             else
             {
                 if(exists $uidmap{$file_uid})
                 {
-                    $test?print "chown $uidmap{$file_uid} $file\n"
-                         :system "chown $uidmap{$file_uid} $filename";
+                     system "chown $uidmap{$file_uid} $filename";
                 }
                 if($prev_gid==$file_gid)
                 {
-                    $test?print "chown :$new_gid $file\n"
-                         :system "chown :$new_gid $filename";
+                     system "chown :$new_gid $filename" unless($uidonly);
                 }
             } 
         }
