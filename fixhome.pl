@@ -11,20 +11,19 @@ my @nohome;     #list of user who don't have home directory, and contain the res
 my $HomeRoot;   #The Root of User's home directory, could be specified by -d option
 my @include=(); #list of include user by -i option
 my @exclude=(); #list of exclude user by -e option
-my $uidonly=0; #value for -u option
+my $uidonly=0;  #value for -u option
 my $test=0;     #value for -t option
-my $follow=0;     #value for -L option, traverse every symbolic link to a directory encounter
+my $follow=0;   #value for -L option, traverse every symbolic link to a directory encounter
 my $help=0;     #value for -h opiton, display the useage of this script.
 
 sub Usage
 {
     print "usage: fixhome.pl [-ufth] [-i|-e user ...] [-d path]\n";
     print "option:\n";
-    print "  -i, --include user ... only fix the the specified users\n";
-    print "  -e, --exclude user ... fix all the user except the specified users\n";
-    print "  -u, --uidonly          only fix the uid while fixing users home, keep gid original\n";
-    print "  -f, --follow           traverse the symlink directory when encounter one,\n";
-    print "                         when it is disable, only modify the link itself\n";
+    print "  -i, --include user ... only fix the home directory for specified users\n";
+    print "  -e, --exclude user ... fix all the home directory except for the specified users\n";
+    print "  -u, --uidonly          only fix the uid while fixing users home, keep gid as original\n";
+    print "  -f, --follow           follow symbolic links\n";
     print "  -t, --test             list out the action without committing any changes\n";
     print "  -d, --dir directory    specify the root of home, like /User,/home...\n";
     print "  -h, --help             display this message\n";
@@ -32,8 +31,14 @@ sub Usage
     $help?exit 0:exit 1;
 }
 
-#This function would return legal users from the array we pass in , whose home directory could be fixed,
-#and reset the global @nouser and @nohome;
+#
+# validate specified users, and filter out the illegal users.
+# illegal users would be classified by errors (User not exist, Home not exist)
+# and would be placed into @nouser or @nohome respectively.
+#
+#   @_:     users
+#   ret:    sorted legal user array
+#
 sub FilterUsers
 {
     @nouser=();
@@ -42,11 +47,11 @@ sub FilterUsers
     foreach my $user (@_)
     {
         my $home_path = File::Spec->catfile($HomeRoot,$user);
-        if(system "id $user >/dev/null 2>&1")
+        if(! defined getpwnam($user))
         {
             push(@nouser,$user);
         }
-        elsif(system "ls -d $home_path > /dev/null 2>&1") #Home Prefix
+        elsif(! -d $home_path) #Home Prefix
         {
             push(@nohome,$user);
         }
@@ -59,22 +64,25 @@ sub FilterUsers
 }
 
 
-#This function would return all the legal user who have home directory,
-#and empty the nohome/nouser array, and reset the nouser array.
-#This function also would initialize the uidmap.
-sub GetAllUsers
+#
+# Get all the legal users whose home is under the directory $HomeRoot
+# it would also build uidmap for validated user. 
+#
+#   ret:    sorted legal user array.
+#
+sub GetAllUsers()
 {
     my @all_user=();
     my $home_uid;
     my $new_uid;
     @nouser=();
     @nohome=();
-    foreach my $user (`ls $HomeRoot/`)
+    foreach my $user (glob("*"))
     {
         my $home_path = File::Spec->catfile($HomeRoot,$user);
         chomp $home_path;
         chomp $user;
-        if(system "id $user >/dev/null 2>&1")
+        if(!defined getpwnam($user))
         {
             push(@nouser,$user);
         }
@@ -83,24 +91,28 @@ sub GetAllUsers
             push(@all_user,$user);
             #initialize the uid hash table.
             $home_uid = (stat($home_path))[4];
-            chomp ($new_uid=`id -u $user`);
+            chomp ($new_uid=getpwnam($user));
             $uidmap{$home_uid}=$new_uid if($home_uid!=$new_uid);
         }
     }
     sort @all_user;
 }
 
-
-#This function would fix User's home directory.
+#
+# fix the home directory for specified legal users,
+# if illegal user been passed in, undef operation would happen.
+# use FilterUsers function make sure the users are all legal.
+#
+#   @_: specified legal users
+#
 sub FixHome
 {
-    my @files;      #Array to store all the files under the home directory
     my $new_uid;    #user's new uid
     my $new_gid;    #user's new gid
     my $prev_uid;   #user's previous uid, assume it's the same with user's home uid
     my $prev_gid;   #user's previous gid, assume it's the same with user's home gid
     my $home_path;
-    print "Would Fix:",join(',',@_),"\n" if($test);
+    
     #Display the uid map
     if($test)
     {
@@ -108,11 +120,12 @@ sub FixHome
         foreach my $user (@_)
         {
             $home_path = File::Spec->catfile($HomeRoot,$user);
-            chomp ($new_uid=`id -u $user`);
-            chomp ($new_gid=`id -g $user`);
-            $prev_uid = (stat("$home_path"))[4];
-            $prev_gid = (stat("$home_path"))[5];
-            next if($new_uid==$prev_uid && $new_gid==$prev_gid);
+            ($new_uid,$new_gid)=(getpwnam($user))[2,3];
+            ($prev_uid,$prev_gid)=(stat("$home_path"))[4,5];
+            if($new_uid==$prev_uid && $new_gid==$prev_gid)
+            {
+                next;
+            }
             printf("%-15s %-30s ",$user,$home_path);
             printf("%-30s ",$prev_uid.'=>'.$new_uid);
             printf("%-30s",$prev_gid.'=>'.$new_gid) unless($uidonly);
@@ -123,80 +136,75 @@ sub FixHome
     }
     foreach my $user (@_)
     {
+        my @files;#Array to store all the files under the home directory
         $home_path = File::Spec->catfile($HomeRoot,$user);
-        chomp ($new_uid=`id -u $user`);
-        chomp ($new_gid=`id -g $user`);
-        $prev_uid = (stat("$home_path"))[4];
-        $prev_gid = (stat("$home_path"))[5];
+        ($new_uid,$new_gid)=(getpwnam($user))[2,3];
+        ($prev_uid,$prev_gid)=(stat("$home_path"))[4,5];
         #Home's mode is correct, don't need to be fixed.
-        next if($new_uid==$prev_uid && $new_gid==$prev_gid);
+        if($new_uid==$prev_uid && $new_gid==$prev_gid)
+        {
+            next;
+        }
         my %options = (
-            wanted      => sub { push(@files,$File::Find::name);},
-            follow      => $follow,
-            follow_skip => 2
+            wanted              => sub { push(@files,$File::Find::name);},
+            follow_fast         => $follow,
+            follow_skip         => 2,
         );
         #Search every files under the home, and keep them in array @files
         find(\%options,$home_path);
         FixFiles($new_uid,$new_gid,$prev_uid,$prev_gid,\@files);
         @files=();
+        print "$user done.\n";
     }
 }
 
-#Used for Travserse the direcory recursively
-sub FixFiles
+#
+# fix all the files in the files array. if file's mode is complete equal to
+# the file's previous uid/gid, use the new uid/gid instead of the old one.
+# if only uid or gid match, search the uidmap and use new id instead.
+#
+#   $_[0]:  Files new uid
+#   $_[1]:  Files new gid
+#   $_[2]:  Files previous uid
+#   $_[3]:  Files previous gid
+#   $_[4]:  Reference of the files array
+#
+sub FixFiles($$$$$)
 {
-    my ($new_uid,$new_gid,$prev_uid,$prev_gid) = @_;
-    my @files = @{$_[4]};
-    foreach my $file (@files)
+    my ($new_uid,$new_gid,$prev_uid,$prev_gid,$files) = @_;
+    my $chown = "chown";
+    foreach my $file (@{$files})
     {
         chomp $file;
         my $filename = $file;
         $filename=~s/([ \$\@!^&*()=\[\]\\;',:{}|"<>?])/\\$1/g; # to fix the special character in file name
-        my $file_uid = (stat($file))[4];
-        my $file_gid = (stat($file))[5];
+        my ($file_uid,$file_gid) = (stat($file))[4,5];
 
         if( -l $file and !$follow)
         {
             #print "<symlink found> $file\n";
             # Fix the link itself and no traverse.
-            $file_uid = (lstat($file))[4];
-            $file_gid = (lstat($file))[5];
-            if($prev_uid==$file_uid && $prev_gid==$file_gid)
-            {
-                $uidonly?system "chown -h $new_uid $filename"
-                        :system "chown -h $new_uid:$new_gid $filename";
-            }
-            else
-            {
-                if(exists $uidmap{$file_uid})
-                {
-                    system "chown -h $uidmap{$file_uid} $filename";
-                }
-                if($prev_gid==$file_gid)
-                {
-                    system "chown -h :$new_gid $filename" unless($uidonly);
-                }
-            }
+            ($file_uid,$file_gid) = (lstat($file))[4,5];
+            $chown." -h ";
+        }
+
+        #print "<symlink found> $file\n" if( -l $file);
+        if($prev_uid==$file_uid && $prev_gid==$file_gid)
+        {
+            $uidonly?system "$chown $new_uid $filename"
+                    :system "$chown $new_uid:$new_gid $filename";
         }
         else
         {
-           if($prev_uid==$file_uid && $prev_gid==$file_gid)
+            if(exists $uidmap{$file_uid})
             {
-                $uidonly?system "chown $new_uid $filename"
-                        :system "chown $new_uid:$new_gid $filename";
+                 system "$chown $uidmap{$file_uid} $filename";
             }
-            else
+            if($prev_gid==$file_gid)
             {
-                if(exists $uidmap{$file_uid})
-                {
-                     system "chown $uidmap{$file_uid} $filename";
-                }
-                if($prev_gid==$file_gid)
-                {
-                     system "chown :$new_gid $filename" unless($uidonly);
-                }
-            } 
-        }
+                 system "$chown :$new_gid $filename" unless($uidonly);
+            }
+        } 
     }
 }
 
@@ -210,7 +218,10 @@ GetOptions ('include=s{1,}' => \@include,
             'help' => \$help)
 or die();
 
-Usage() if $help;
+if($help)
+{
+    Usage();
+}
 
 # Test if we have root permission
 if ($> != 0)
@@ -219,7 +230,11 @@ if ($> != 0)
 }
 
 # Detect the running platform and initilize
-print "Detect running on $OSNAME...\n\n" if $test;
+if($test)
+{
+    print "Detect running on $OSNAME...\n\n";
+}
+
 if($OSNAME eq "darwin")
 {
     $HomeRoot="/Users";
@@ -248,7 +263,7 @@ else
 $HomePath?$HomeRoot=$HomePath
          :print "Use default directory \"$HomeRoot\" as the HomeRoot\n\n";
 
-unless (-d $HomeRoot)
+if (!-d $HomeRoot)
 {
     print "Directory $HomeRoot doesn't exist...\n\n";
     Usage();
@@ -263,34 +278,62 @@ if(@include && @exclude)
 
 if(@include)
 {
+    #validate included users
+    my @targets = FilterUsers(@include);
+    if(@nouser)
+    {
+        print "<Error> Users:\t".join("\n\t\t",@nouser)."\ncould not found in the system, ".
+              "Please check if you type the right name.\n\n";
+    }
+    if(@nohome)
+    {
+        print "<Warning> Users:\t".join("\n\t\t",@nohome)." got no home under $HomeRoot, ".
+              "will skip this user while fixing.\n\n";
+    }
+    if(@nouser)
+    {
+        Usage();
+    }
+
     #initilize the the uidmap;
     GetAllUsers();
-    my @targets = FilterUsers(@include);
-    print "<Error> Users:\t".join("\n\t\t",@nouser)."\ncould not found in the system, ".
-          "Please check if you type the right name.\n\n" if(@nouser);
-    print "<Warning> Users:\t".join("\n\t\t",@nohome)." got no home under $HomeRoot, ".
-          "will skip this user while fixing.\n\n" if(@nohome);
-    Usage() if(@nouser);
+    
+    #fix the directory
     FixHome(@targets);
 }
 elsif(@exclude)
 {
-    my @extarget = FilterUsers(@exclude);
-    print "<Warning> User:\t".join("\n\t\t",@nouser)."\ncould not found in the system, ".
-          "will skip this user while fixing.\n\n" if(@nouser);
-    print "<Warning> User:\t".join("\n\t\t",@nohome)."\ngot no home under $HomeRoot, ".
-          "will skip this user while fixing.\n\n" if(@nohome);
-
+    #get all the legal user whose home could be fixed
     my @alltargets = GetAllUsers();
-    foreach my $user (@exclude){
+
+    #exclude those home which belong to excluded user
+    foreach my $user (@exclude)
+    {
         @nouser = grep !/$user/,@nouser;
     }
-    print "<Warning> Home:\t".join("\n\t\t",@nouser)."\nwill not be fixed, could not ".
-          "find their owner.\n\n";
+    if(@nouser)
+    {
+        print "<Warning> Home:\t".join("\n\t\t",@nouser)."\nwill not be fixed, could not ".
+              "find their owner.\n\n";
+    }
+
+    #get exclude users and validate whether it is legal
+    my @extarget = FilterUsers(@exclude);
+    if(@nouser)
+    {
+        print "<Warning> User:\t".join("\n\t\t",@nouser)."\ncould not found in the system, ".
+              "will skip this user while fixing.\n\n";
+    }
+    if(@nohome)
+    {
+        print "<Warning> User:\t".join("\n\t\t",@nohome)."\ngot no home under $HomeRoot, ".
+              "will skip this user while fixing.\n\n";
+    }
 
     print "Exclude Users: ",join(',',@extarget),"\n" if($test);
     print "All Users: ",join(',',@alltargets),"\n" if($test);
     
+    #Calculate the Home need to be fixed and fix them all
     my @targets = ();
     my $i = 0;
     my $j = 0;
