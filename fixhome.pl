@@ -1,4 +1,4 @@
-#!/usr/bin/perl -w
+#!/bin/sh /usr/share/centrifydc/perl/run
 use strict;
 use Getopt::Long;
 use File::Spec;
