@@ -5,16 +5,16 @@ use File::Spec;
 use File::Find;
 use English qw( -no_match_vars );
 
-my %uidmap;     #The hash table, maps old uid to new uid
-my @nouser;     #list of users not found in system, and contain the result from FilterUsers, GetAllUsers
-my @nohome;     #list of user who don't have home directory, and contain the result from FilterUsers,GetAllUsers
-my $HomeRoot;   #The Root of User's home directory, could be specified by -d option
-my @include=(); #list of include user by -i option
-my @exclude=(); #list of exclude user by -e option
-my $uidonly=0;  #value for -u option
-my $test=0;     #value for -t option
-my $follow=0;   #value for -L option, traverse every symbolic link to a directory encounter
-my $help=0;     #value for -h opiton, display the useage of this script.
+my %uidmap;         #The hash table, maps old uid to new uid
+my @nouser;         #list of users not found in system, and contain the result from FilterUsers, GetAllUsers
+my @nohome;         #list of user who don't have home directory, and contain the result from FilterUsers,GetAllUsers
+my $HomeRoot;       #The Root of User's home directory, could be specified by -d option
+my @include = ();   #list of include user by -i option
+my @exclude = ();   #list of exclude user by -e option
+my $uidonly = 0;      #value for -u option
+my $test = 0;         #value for -t option
+my $follow = 0;       #value for -L option, traverse every symbolic link to a directory encounter
+my $help = 0;         #value for -h opiton, display the useage of this script.
 
 sub Usage
 {
@@ -41,9 +41,9 @@ sub Usage
 #
 sub FilterUsers
 {
-    @nouser=();
-    @nohome=();
-    my @legal_user=();
+    @nouser = ();
+    @nohome = ();
+    my @legal_user = ();
     foreach my $user (@_)
     {
         my $home_path = File::Spec->catfile($HomeRoot,$user);
@@ -60,7 +60,7 @@ sub FilterUsers
             push(@legal_user,$user);
         }
     }
-    sort @legal_user;
+    return sort @legal_user;
 }
 
 
@@ -72,14 +72,14 @@ sub FilterUsers
 #
 sub GetAllUsers()
 {
-    my @all_user=();
+    my @all_user = ();
     my $home_uid;
     my $new_uid;
-    @nouser=();
-    @nohome=();
+    @nouser = ();
+    @nohome = ();
     foreach my $user (glob("$HomeRoot/*"))
     {
-        $user =~ s#$HomeRoot/##g;
+        $user =~ s#^$HomeRoot/##;
         my $home_path = File::Spec->catfile($HomeRoot,$user);
         chomp $home_path;
         chomp $user;
@@ -92,11 +92,11 @@ sub GetAllUsers()
             push(@all_user,$user);
             #initialize the uid hash table.
             $home_uid = (stat($home_path))[4];
-            chomp ($new_uid=getpwnam($user));
-            $uidmap{$home_uid}=$new_uid if($home_uid!=$new_uid);
+            chomp ($new_uid = getpwnam($user));
+            $uidmap{$home_uid} = $new_uid if($home_uid != $new_uid);
         }
     }
-    sort @all_user;
+    return sort @all_user;
 }
 
 #
@@ -121,9 +121,9 @@ sub FixHome
         foreach my $user (@_)
         {
             $home_path = File::Spec->catfile($HomeRoot,$user);
-            ($new_uid,$new_gid)=(getpwnam($user))[2,3];
-            ($prev_uid,$prev_gid)=(stat("$home_path"))[4,5];
-            if($new_uid==$prev_uid && $new_gid==$prev_gid)
+            ($new_uid,$new_gid) = (getpwnam($user))[2,3];
+            ($prev_uid,$prev_gid) = (stat("$home_path"))[4,5];
+            if($new_uid == $prev_uid && $new_gid == $prev_gid)
             {
                 next;
             }
@@ -139,27 +139,21 @@ sub FixHome
     {
         my @files;#Array to store all the files under the home directory
         $home_path = File::Spec->catfile($HomeRoot,$user);
-        ($new_uid,$new_gid)=(getpwnam($user))[2,3];
-        ($prev_uid,$prev_gid)=(stat("$home_path"))[4,5];
+        ($new_uid,$new_gid) = (getpwnam($user))[2,3];
+        ($prev_uid,$prev_gid) = (stat("$home_path"))[4,5];
         #Home's mode is correct, don't need to be fixed.
-        if($new_uid==$prev_uid && $new_gid==$prev_gid)
+        if($new_uid == $prev_uid && $new_gid == $prev_gid)
         {
             next;
         }
         my %options = (
-            wanted              => sub 
-                                   {
-                                    #skip the dangling symlink
-                                    -l && !-e && return;
-                                    push(@files,$File::Find::name);
-                                   },
-            follow_fast         => $follow,
-            follow_skip         => 2
+            wanted          =>  sub { push(@files,$File::Find::name);},
+            follow_fast     => $follow,
+            follow_skip     => 2
         );
         #Search every files under the home, and keep them in array @files
         find(\%options,$home_path);
         FixFiles($new_uid,$new_gid,$prev_uid,$prev_gid,\@files);
-        @files=();
         print "$user done.\n";
     }
 }
@@ -183,10 +177,16 @@ sub FixFiles($$$$$)
     {
         chomp $file;
         my $filename = $file;
-        $filename=~s/([ \$\@!^&*()=\[\]\\;',:{}|"<>?])/\\$1/g; # to fix the special character in file name
+        $filename =~ s/([ \$\@!^&*()=\[\]\\;',:{}|"<>?])/\\$1/g; # to fix the special character in file name
         my ($file_uid,$file_gid) = (stat($file))[4,5];
 
-        if( -l $file and !$follow)
+        if(-l $file and !-e $files and $follow)
+        {
+            #ignore dangling symlink when -f option is enabled
+            next;
+        }
+
+        if(-l $file and !$follow)
         {
             #print "<symlink found> $file\n";
             # Fix the link itself and no traverse.
@@ -195,7 +195,7 @@ sub FixFiles($$$$$)
         }
 
         #print "<symlink found> $file\n" if( -l $file);
-        if($prev_uid==$file_uid && $prev_gid==$file_gid)
+        if($prev_uid == $file_uid && $prev_gid == $file_gid)
         {
             $uidonly?system "$chown $new_uid $filename"
                     :system "$chown $new_uid:$new_gid $filename";
@@ -206,7 +206,7 @@ sub FixFiles($$$$$)
             {
                  system "$chown $uidmap{$file_uid} $filename";
             }
-            if($prev_gid==$file_gid)
+            if($prev_gid == $file_gid)
             {
                  system "$chown :$new_gid $filename" unless($uidonly);
             }
@@ -243,19 +243,19 @@ if($test)
 
 if($OSNAME eq "darwin")
 {
-    $HomeRoot="/Users";
+    $HomeRoot = "/Users";
 }
 elsif($OSNAME eq "linux")
 {
-    $HomeRoot="/home";
+    $HomeRoot = "/home";
 }
 elsif($OSNAME eq "solaris")
 {
-    $HomeRoot="/export/home";
+    $HomeRoot = "/export/home";
 }
 elsif($OSNAME eq "aix")
 {
-    $HomeRoot="/home";
+    $HomeRoot = "/home";
 }
 elsif($OSNAME eq "hpux")
 {
@@ -278,7 +278,7 @@ if (!-d $HomeRoot)
 
 if(@include && @exclude)
 {
-    print "-i and -e couldn't appear at the same time\n\n";
+    print "-i and -e can not be used at the same time\n\n";
     Usage();
 }
 
@@ -337,10 +337,12 @@ elsif(@exclude)
     }
 
     #Calculate the Home need to be fixed and fix them all
+    #the @alltargets and @extarget below has to be sorted
     my @targets = ();
     my $i = 0;
     my $j = 0;
-    while($i<@alltargets && $j<@extarget)
+
+    while($i < @alltargets && $j < @extarget)
     {
         if($alltargets[$i] eq $extarget[$j])
         {
