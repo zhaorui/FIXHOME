@@ -11,10 +11,11 @@ my @nohome;         #list of user who don't have home directory, and contain the
 my $HomeRoot;       #The Root of User's home directory, could be specified by -d option
 my @include = ();   #list of include user by -i option
 my @exclude = ();   #list of exclude user by -e option
-my $uidonly = 0;      #value for -u option
-my $test = 0;         #value for -t option
-my $follow = 0;       #value for -L option, traverse every symbolic link to a directory encounter
-my $help = 0;         #value for -h opiton, display the useage of this script.
+my $uidonly = 0;    #value for -u option
+my $test = 0;       #value for -t option
+my $follow = 0;     #value for -L option, traverse every symbolic link to a directory encounter
+my $xdev = 0;       #value for -x optoin, escape traversing mount point
+my $help = 0;       #value for -h opiton, display the useage of this script.
 
 sub Usage
 {
@@ -26,8 +27,8 @@ sub Usage
     print "  -f, --follow           follow symbolic links\n";
     print "  -t, --test             list out the action without committing any changes\n";
     print "  -d, --dir directory    specify the root of home, like /User,/home...\n";
+    print "  -x, --xdev             escape crossing across file system mount poin\n";
     print "  -h, --help             display this message\n";
-    
     $help?exit 0:exit 1;
 }
 
@@ -221,6 +222,7 @@ GetOptions ('include=s{1,}' => \@include,
             'test' => \$test,
             'dir=s' => \$HomePath,
             'follow' => \$follow,
+            'xdev' => \$xdev,
             'help' => \$help)
 or die();
 
@@ -380,4 +382,5 @@ if($test)
     print "uidonly: $uidonly","\n";
     print "test: $test \n";
     print "follow: $follow\n";
+    print "xdev: $xdev\n";
 }
