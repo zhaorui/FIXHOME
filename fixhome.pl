@@ -9,26 +9,27 @@ my %uidmap;         #The hash table, maps old uid to new uid
 my @nouser;         #list of users not found in system, and contain the result from FilterUsers, GetAllUsers
 my @nohome;         #list of user who don't have home directory, and contain the result from FilterUsers,GetAllUsers
 my $HomeRoot;       #The Root of User's home directory, could be specified by -d option
-my @include = ();   #list of include user by -i option
-my @exclude = ();   #list of exclude user by -e option
+my @include;        #list of include user by -i option
+my @exclude;        #list of exclude user by -e option
 my $uidonly = 0;    #value for -u option
 my $test = 0;       #value for -t option
 my $follow = 0;     #value for -L option, traverse every symbolic link to a directory encounter
-my $xdev = 0;       #value for -x optoin, escape traversing mount point
 my $help = 0;       #value for -h opiton, display the useage of this script.
 
 sub Usage
 {
     print "usage: fixhome.pl [-ufth] [-i|-e user ...] [-d path]\n";
     print "option:\n";
-    print "  -i, --include user ... only fix the home directory for specified users\n";
-    print "  -e, --exclude user ... fix all the home directory except for the specified users\n";
-    print "  -u, --uidonly          only fix the uid while fixing users home, keep gid as original\n";
-    print "  -f, --follow           follow symbolic links\n";
-    print "  -t, --test             list out the action without committing any changes\n";
-    print "  -d, --dir directory    specify the root of home, like /User,/home...\n";
-    print "  -x, --xdev             escape crossing across file system mount poin\n";
-    print "  -h, --help             display this message\n";
+    print "  -i, --include user[,...] only fix the home directory for specified users,\n";
+    print "                           users must be separated by comma\n";
+    print "  -e, --exclude user[,...] fix all the home directory except for the specified users,\n";
+    print "                           users must be separated by comma\n";
+    print "  -u, --uidonly            only fix the uid while fixing users home, keep gid as original\n";
+    print "  -f, --follow             follow symbolic links\n";
+    print "  -t, --test               list out the action without committing any changes\n";
+    print "  -d, --dir directory      specify the root of home, like /User,/home...\n";
+    print "  -h, --help               display this message\n";
+    
     $help?exit 0:exit 1;
 }
 
@@ -148,15 +149,7 @@ sub FixHome
             next;
         }
         my %options = (
-            wanted          =>  sub {
-                                        my $dev = (stat($_))[0];
-                                        if ($xdev and $dev != $File::Find::topdev)
-                                        {
-                                            #print "Escaping $File::Find::name\n";
-                                            return;
-                                        }
-                                        push(@files,$File::Find::name);
-                                    },
+            wanted          =>  sub { push(@files,$File::Find::name);},
             follow_fast     => $follow,
             follow_skip     => 2
         );
@@ -224,15 +217,16 @@ sub FixFiles($$$$$)
 }
 
 my $HomePath; # Temp variable to store the root directory of Home.
-GetOptions ('include=s{1,}' => \@include,
-            'exclude=s{1,}' => \@exclude,
+GetOptions ('include=s' => \@include,
+            'exclude=s' => \@exclude,
             'uidonly' => \$uidonly,
             'test' => \$test,
             'dir=s' => \$HomePath,
             'follow' => \$follow,
-            'xdev' => \$xdev,
             'help' => \$help)
 or die();
+@include = split(/,/,join(',',@include));
+@exclude = split(/,/,join(',',@exclude));
 
 if($help)
 {
@@ -390,5 +384,4 @@ if($test)
     print "uidonly: $uidonly","\n";
     print "test: $test \n";
     print "follow: $follow\n";
-    print "xdev: $xdev\n";
 }
