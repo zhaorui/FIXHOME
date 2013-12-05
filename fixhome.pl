@@ -81,6 +81,11 @@ sub GetAllUsers()
     @nohome = ();
     foreach my $user (glob("$HomeRoot/*"))
     {
+        if(-f $user)
+        {
+            next;
+        }
+
         $user =~ s#^$HomeRoot/##;
         my $home_path = File::Spec->catfile($HomeRoot,$user);
         chomp $home_path;
@@ -174,7 +179,6 @@ sub FixHome
 sub FixFiles($$$$$)
 {
     my ($new_uid,$new_gid,$prev_uid,$prev_gid,$files) = @_;
-    my $chown = "chown";
     foreach my $file (@{$files})
     {
         chomp $file;
@@ -190,27 +194,26 @@ sub FixFiles($$$$$)
 
         if(-l $file and !$follow)
         {
-            #print "<symlink found> $file\n";
-            # Fix the link itself and no traverse.
-            ($file_uid,$file_gid) = (lstat($file))[4,5];
-            $chown.=" -h ";
+            #if not followd symbolic link, just skip the symbolic file
+            next;
         }
+        
 
         #print "<symlink found> $file\n" if( -l $file);
         if($prev_uid == $file_uid && $prev_gid == $file_gid)
         {
-            $uidonly?system "$chown $new_uid $filename"
-                    :system "$chown $new_uid:$new_gid $filename";
+            $uidonly?chown($new_uid, -1, $filename)
+                    :chown($new_uid, $new_gid, $filename);
         }
         else
         {
             if(exists $uidmap{$file_uid})
             {
-                 system "$chown $uidmap{$file_uid} $filename";
+                 chown $uidmap{$file_uid}, -1, $filename;
             }
             if($prev_gid == $file_gid)
             {
-                 system "$chown :$new_gid $filename" unless($uidonly);
+                 chown(-1, $new_gid, $filename) unless($uidonly);
             }
         } 
     }
