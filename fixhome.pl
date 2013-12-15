@@ -1,4 +1,4 @@
-#!/usr/bin/perl -w
+#!/bin/sh /usr/share/centrifydc/perl/run
 use strict;
 use Getopt::Long;
 use File::Spec;
@@ -38,10 +38,10 @@ sub Usage
 #
 # $_[0]: user's name
 # ret:   1 or 0
-sub IsNetworkUser($)
+sub IsADUser($)
 {
     my $user = $_[0];
-    if($user eq "")
+    if(!defined($user))
     {
         return 0;
     }
@@ -49,8 +49,43 @@ sub IsNetworkUser($)
     return !$?;
 }
 
+# Obtain home folder name from the user's name, this function support UPN format username.
+# Usually, home folder name is same with user's name, unless user's name have one of these
+# character "/\[]:;|=,+*?<>@". These character would be instead by "_" in their folder name.
+# 
+# $_[0]:    user'name
+# ret:      full path of user's home folder
+sub GetHomeName($)
+{
+    my $home_name = $_[0];
+    my $upn_prefix;
+    my $home_path;
+    my $tmp_home_name = $home_name;
+    $tmp_home_name =~ s/[\/\\\[\]:;|=,+*?<>@]/_/g;
+
+    #Support UPN for user's name
+    if ($home_name =~ /(.*)@.*$/)
+    {
+        my $upn_prefix=$1;
+        #deal with cross-forest user
+        if(!IsADUser($tmp_home_name))
+        {
+            $upn_prefix =~ s/[\/\\\[\]:;|=,+*?<>@]/_/g;
+            $home_name=$upn_prefix;
+            $home_path = File::Spec->catfile($HomeRoot,$home_name);
+            return $home_path;
+        }
+    }
+
+    #deal with current-forest user
+    $home_name=$tmp_home_name;
+    $home_path = File::Spec->catfile($HomeRoot,$home_name);
+    return $home_path;
+}
+
 # Changing user's local uid/gid at all platform.
-#
+# This function is only Darwin platform
+# 
 # $_[0]:    user's name
 # $_[1]:    user's new uid
 # $_[2]:    user's new gid
@@ -60,20 +95,26 @@ sub ChangeID($$$)
     my $user = $_[0];
     my $uid  = $_[1];
     my $gid  = $_[2];
-    if($OSNAME eq "darwin")
+
+    if($OSNAME ne "darwin")
     {
-        system "dscl /Local/Default -create /Users/$user UniqueID $uid";
-        system "dscl /Local/Default -create /Users/$user PrimaryGroupID $gid";
+        return;
     }
-    else
+
+    # validate the inputs
+    if(!($uid =~ /^[0-9]+$/) || !($gid =~ /^[0-9]+$/) || !defined($user))
     {
-        system "usermod -u $uid $user";
-        system "usermod -g $gid $user";
+        print "Could not change UID/GID($uid/$gid) for $user";
+        return;
     }
+
+    system "dscl /Local/Default -create /Users/$user UniqueID $uid";
+    system "dscl /Local/Default -create /Users/$user PrimaryGroupID $gid";
 }
 
 # Fix the user's conflict local uid and network uid.
 # The conlict happens when mobile user use new uid/gid shceme.
+# This funciton is only Darwin platform
 #
 #  @_:      users
 #
@@ -83,21 +124,35 @@ sub FixConflictID
     my $netuid;
     my $netgid;
 
+    # This funciton is only used to fix the "different value return from 'id' and 'adquery user'"
+    # problem, this problem only happen on Mac when use mobile user account.
+    if($OSNAME ne "darwin")
+    {
+        return;
+    }
+
     if($test)
     {
-        printf("%-23s %-23s %-10s %-15s\n",'LocalUid(Name/Map)',     'Zone UID(Name/Map)',     'Resolution','ID Map');
-        printf("%-23s %-23s %-10s %-15s\n",'-----------------------','-----------------------','----------','---------------');
+        printf("%-23s %-23s %-12s %-12s\n",'LocalUid(Name/Map)','Zone UID(Name/Map)','Resolution','ID Map');
     }
 
     foreach my $user (@_)
     {
         # conflict uid only happend at network user, if it's not, skip it.
-        if(!IsNetworkUser($user))
+        if(!IsADUser($user))
+        {
+            next;
+        }
+        
+        # skip the AD user who don't have a local uid.
+        system "dscl /Local/Default -read /Users/$user UniqueID > /dev/null 2>&1";
+        if($? != 0)
         {
             next;
         }
 
-        chomp($localuid = getpwnam($user));
+        chomp($localuid = `dscl /Local/Default -read /Users/$user UniqueID`);
+        $localuid =~ s/UniqueID: //;
         chomp($netuid = `adquery user $user --attribute _Uid`);
         chomp($netgid = `adquery user $user --attribute _Gid`);
 
@@ -105,7 +160,7 @@ sub FixConflictID
         {
             if($test)
             {
-                printf("%s%-13s %s%-13s %-10s %-15s", $localuid,"($user)",$netuid,"($user)",'Use Zone ID',$netuid);
+                printf("%-23s %-23s %-12s %-12s", $localuid."($user)",$netuid."($user)",'Use Zone ID',$netuid);
                 print "\n";
             }
             else
@@ -122,9 +177,9 @@ sub FixConflictID
 }
 
 #
-# validate specified users, and filter out the illegal users.
-# illegal users would be classified by errors (User not exist, Home not exist)
-# and would be placed into @nouser or @nohome respectively.
+# This function is mainly used to filter out illegal users which be specified after
+# the -i or -e option. Illegal users would be classified by errors (User not exist, 
+# Home not exist) and would be placed into @nouser or @nohome respectively.
 #
 #   @_:     users
 #   ret:    sorted legal user array
@@ -134,9 +189,10 @@ sub FilterUsers
     @nouser = ();
     @nohome = ();
     my @legal_user = ();
+    my $home_path;
     foreach my $user (@_)
     {
-        my $home_path = File::Spec->catfile($HomeRoot,$user);
+        $home_path = GetHomeName($user);
         if(! defined getpwnam($user))
         {
             push(@nouser,$user);
@@ -169,6 +225,11 @@ sub GetAllUsers()
     @nohome = ();
     foreach my $user (glob("$HomeRoot/*"))
     {
+        if(!-d $user)
+        {
+            next;
+        }
+
         $user =~ s#^$HomeRoot/##;
         my $home_path = File::Spec->catfile($HomeRoot,$user);
         chomp $home_path;
@@ -182,7 +243,7 @@ sub GetAllUsers()
             push(@all_user,$user);
             #initialize the uid hash table.
             $home_uid = (stat($home_path))[4];
-            if(IsNetworkUser($user))
+            if(IsADUser($user))
             {
                 chomp ($new_uid = `adquery user $user --attribute _Uid`);
             }
@@ -210,15 +271,18 @@ sub FixHome
     my $prev_uid;   #user's previous uid, assume it's the same with user's home uid
     my $prev_gid;   #user's previous gid, assume it's the same with user's home gid
     my $home_path;
-    
+   
+    # Before fix user's home, fix the conlict uid/gid first.
+    FixConflictID(@_);
+
     #Display the uid map
     if($test)
     {
-        printf("%-15s %-25s %-30s %-30s\n",'User','Home','UID Map','GID Map');
+        printf("%-11s %-18s %-30s %-30s\n",'User','Home','UID Map','GID Map');
         foreach my $user (@_)
         {
-            $home_path = File::Spec->catfile($HomeRoot,$user);
-            if(IsNetworkUser($user))
+            $home_path = GetHomeName($user);
+            if(IsADUser($user))
             {
                 chomp($new_uid = `adquery user $user --attribute _Uid`);
                 chomp($new_gid = `adquery user $user --attribute _Gid`);
@@ -232,7 +296,7 @@ sub FixHome
             {
                 next;
             }
-            printf("%-15s %-25s ",$user,$home_path);
+            printf("%-11s %-18s ",$user,$home_path);
             printf("%-30s ",$prev_uid.'=>'.$new_uid);
             printf("%-30s",$prev_gid.'=>'.$new_gid) unless($uidonly);
             print "\n";
@@ -243,8 +307,9 @@ sub FixHome
     foreach my $user (@_)
     {
         my @files;#Array to store all the files under the home directory
-        $home_path = File::Spec->catfile($HomeRoot,$user);
-        if(IsNetworkUser($user))
+        $home_path = GetHomeName($user);
+
+        if(IsADUser($user))
         {
             chomp($new_uid = `adquery user $user --attribute _Uid`);
             chomp($new_gid = `adquery user $user --attribute _Gid`);
@@ -260,15 +325,7 @@ sub FixHome
             next;
         }
         my %options = (
-            wanted          =>  sub {
-                                        my $dev = (stat($_))[0];
-                                        if ($xdev and $dev != $File::Find::topdev)
-                                        {
-                                            #print "Escaping $File::Find::name\n";
-                                            return;
-                                        }
-                                        push(@files,$File::Find::name);
-                                    },
+            wanted          =>  sub { push(@files,$File::Find::name);},
             follow_fast     => $follow,
             follow_skip     => 2
         );
@@ -293,49 +350,54 @@ sub FixHome
 sub FixFiles($$$$$)
 {
     my ($new_uid,$new_gid,$prev_uid,$prev_gid,$files) = @_;
-    my $chown = "chown";
     foreach my $file (@{$files})
     {
         chomp $file;
         my $filename = $file;
-        $filename =~ s/([ \$\@!^&*()=\[\]\\;',:{}|"<>?])/\\$1/g; # to fix the special character in file name
+        
+        # to fix the special character in file name
+        #$filename =~ s/([ \$\@!^&*()=\[\]\\;',:{}|"<>?])/\\$1/g; 
         my ($file_uid,$file_gid) = (stat($file))[4,5];
 
-        if(-l $file and !-e $files and $follow)
+        if(-l $file)
         {
-            #ignore dangling symlink when -f option is enabled
-            next;
-        }
-
-        if(-l $file and !$follow)
-        {
-            #print "<symlink found> $file\n";
-            # Fix the link itself and no traverse.
-            ($file_uid,$file_gid) = (lstat($file))[4,5];
-            $chown.=" -h ";
+            if($follow)
+            {
+                if(!-e $file)
+                {
+                    #ignore dangling symlink when -f option is enabled
+                    next;
+                }
+            }
+            else
+            {
+                #if not followd symbolic link, just skip the symbolic file
+                next;
+            }
         }
 
         #print "<symlink found> $file\n" if( -l $file);
         if($prev_uid == $file_uid && $prev_gid == $file_gid)
         {
-            $uidonly?system "$chown $new_uid $filename"
-                    :system "$chown $new_uid:$new_gid $filename";
+            $uidonly?chown($new_uid, -1, $filename)
+                    :chown($new_uid, $new_gid, $filename);
         }
         else
         {
             if(exists $uidmap{$file_uid})
             {
-                 system "$chown $uidmap{$file_uid} $filename";
+                 chown $uidmap{$file_uid}, -1, $filename;
             }
             if($prev_gid == $file_gid)
             {
-                 system "$chown :$new_gid $filename" unless($uidonly);
+                 chown(-1, $new_gid, $filename) unless($uidonly);
             }
         } 
     }
 }
 
-my $HomePath; # Temp variable to store the root directory of Home.
+# Temp variable to store the root directory of Home.
+my $HomePath; 
 GetOptions ('include=s' => \@include,
             'exclude=s' => \@exclude,
             'uidonly' => \$uidonly,
@@ -355,13 +417,14 @@ if($help)
 # Test if we have root permission
 if ($> != 0)
 {
-    die "This Script Need Root Permission, Please run with \"sudo\" ";
+    print "This script needs root permission. Please run with \"sudo\".\n";
+    exit 1;
 }
 
 # Detect the running platform and initilize
 if($test)
 {
-    print "Detect running on $OSNAME...\n\n";
+    print "Your OS: $OSNAME\n";
 }
 
 if($OSNAME eq "darwin")
@@ -386,50 +449,47 @@ elsif($OSNAME eq "hpux")
 }
 else
 {
-    die "This platform is not supported.";
+    print "This platform is not supported.\n";
+    exit 1;
 }
 
 $HomePath?$HomeRoot=$HomePath
-         :print "Use default directory \"$HomeRoot\" as the HomeRoot\n\n";
+         :print "Default HomeRoot: \"$HomeRoot\"\n\n";
 
 if (!-d $HomeRoot)
 {
-    print "Directory $HomeRoot doesn't exist...\n\n";
-    Usage();
+    print "Directory $HomeRoot does not exist.\n\n";
 }
 
 
 if(@include && @exclude)
 {
-    print "-i and -e can not be used at the same time\n\n";
+    print "Option -i and -e could not be used at the same time.\n\n";
     Usage();
 }
 
 if(@include)
 {
+    #initilize the the uidmap;
+    GetAllUsers();
+
     #validate included users
     my @targets = FilterUsers(@include);
     if(@nouser)
     {
-        print "<Error> Users:\t".join("\n\t\t",@nouser)."\ncould not found in the system, ".
-              "Please check if you type the right name.\n\n";
+        print "<Error>\nUsers list below were not found in the system.\n\t".
+              join("\n\t",@nouser)."\n".
+              "Please check if the user names are entered correctly.\n\n";
+        exit 1;
     }
     if(@nohome)
     {
-        print "<Warning> Users:\t".join("\n\t\t",@nohome)." got no home under $HomeRoot, ".
-              "will skip this user while fixing.\n\n";
-    }
-    if(@nouser)
-    {
-        Usage();
+        print "<Warning>\nUsers list below did not have their home directories found under $HomeRoot.\n\t".
+              join("\n\t",@nohome)."\n ".
+              "These users will be skipped.\n\n";
     }
 
-    #initilize the the uidmap;
-    GetAllUsers();
 
-    #fix the conflict target
-    FixConflictID(@targets);
-    
     #fix the directory
     FixHome(@targets);
 }
@@ -445,21 +505,22 @@ elsif(@exclude)
     }
     if(@nouser)
     {
-        print "<Warning> Home:\t".join("\n\t\t",@nouser)."\nwill not be fixed, could not ".
-              "find their owner.\n\n";
+        print "<Warning>\nOwners of the home directories list below were not found in the system.\n\t".
+              join("\n\t",@nouser)."\nThese home directories will be skipped.\n\n";
     }
 
     #get exclude users and validate whether it is legal
     my @extarget = FilterUsers(@exclude);
     if(@nouser)
     {
-        print "<Warning> User:\t".join("\n\t\t",@nouser)."\ncould not found in the system, ".
-              "will skip this user while fixing.\n\n";
+        print "<Warning>\nUsers list below were not found in the system.\n\t".
+              join("\n\t",@nouser)."\nPlease check if the user names are entered correctly.\n\n ";
     }
     if(@nohome)
     {
-        print "<Warning> User:\t".join("\n\t\t",@nohome)."\ngot no home under $HomeRoot, ".
-              "will skip this user while fixing.\n\n";
+        print "<Warning>\nUsers list below did not have their home directories found under $HomeRoot.\n\t".
+              join("\n\t",@nohome)."\n".
+              "Please check if the user names are entered correctly.\n\n";
     }
 
     #Calculate the Home need to be fixed and fix them all
@@ -491,27 +552,24 @@ elsif(@exclude)
         $i++;
     }
 
-    #fix conflict target
-    FixConflictID(@targets);
-
     FixHome(@targets);
 }
 else
 {
     my @targets = GetAllUsers();
-    
-    #fix conflict target
-    FixConflictID(@targets);
-
     FixHome(@targets);
 }
 
 if($test)
 {
-    print "HomeRoot: ",$HomeRoot."\n";
-    print "Include: ",join(',',@include),"\n";
-    print "Exclude:",join(',',@exclude),"\n";
-    print "uidonly: $uidonly","\n";
-    print "test: $test \n";
-    print "follow: $follow\n";
+    print "fixhome.pl input (or default) options:\n";
+    print "User included        (-i): ",join(',',@include),"\n";
+    print "User excluded        (-e): ",join(',',@exclude),"\n";
+    print "Follow option        (-f): ";
+    $follow?print "Enable\n":print "Disable\n";
+    print "UID only option      (-u): ";
+    $uidonly?print "Enable\n":print "Disable\n";
+    print "Test option          (-t): ";
+    $test?print "Enable\n":print "Disable\n";
+    print "Home directories root(-d): ",$HomeRoot."\n";
 }
