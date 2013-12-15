@@ -1,4 +1,4 @@
-#!/bin/sh /usr/share/centrifydc/perl/run
+#!/usr/bin/perl -w
 use strict;
 use Getopt::Long;
 use File::Spec;
@@ -154,7 +154,15 @@ sub FixHome
             next;
         }
         my %options = (
-            wanted          =>  sub { push(@files,$File::Find::name);},
+            wanted          =>  sub {
+                                        my $dev = (stat($_))[0];
+                                        if ($xdev and $dev != $File::Find::topdev)
+                                        {
+                                            #print "Escaping $File::Find::name\n";
+                                            return;
+                                        }
+                                        push(@files,$File::Find::name);
+                                    },
             follow_fast     => $follow,
             follow_skip     => 2
         );
