@@ -33,6 +33,94 @@ sub Usage
     $help?exit 0:exit 1;
 }
 
+# Detect if a user is a network user
+# if it's network user reutrn 1, else return 0
+#
+# $_[0]: user's name
+# ret:   1 or 0
+sub IsNetworkUser($)
+{
+    my $user = $_[0];
+    if($user eq "")
+    {
+        return 0;
+    }
+    system "adquery user $user > /dev/null 2>&1";
+    return !$?;
+}
+
+# Changing user's local uid/gid at all platform.
+#
+# $_[0]:    user's name
+# $_[1]:    user's new uid
+# $_[2]:    user's new gid
+#
+sub ChangeID($$$)
+{
+    my $user = $_[0];
+    my $uid  = $_[1];
+    my $gid  = $_[2];
+    if($OSNAME eq "darwin")
+    {
+        system "dscl /Local/Default -create /Users/$user UniqueID $uid";
+        system "dscl /Local/Default -create /Users/$user PrimaryGroupID $gid";
+    }
+    else
+    {
+        system "usermod -u $uid $user";
+        system "usermod -g $gid $user";
+    }
+}
+
+# Fix the user's conflict local uid and network uid.
+# The conlict happens when mobile user use new uid/gid shceme.
+#
+#  @_:      users
+#
+sub FixConflictID
+{
+    my $localuid;
+    my $netuid;
+    my $netgid;
+
+    if($test)
+    {
+        printf("%-23s %-23s %-10s %-15s\n",'LocalUid(Name/Map)',     'Zone UID(Name/Map)',     'Resolution','ID Map');
+        printf("%-23s %-23s %-10s %-15s\n",'-----------------------','-----------------------','----------','---------------');
+    }
+
+    foreach my $user (@_)
+    {
+        # conflict uid only happend at network user, if it's not, skip it.
+        if(!IsNetworkUser($user))
+        {
+            next;
+        }
+
+        chomp($localuid = getpwnam($user));
+        chomp($netuid = `adquery user $user --attribute _Uid`);
+        chomp($netgid = `adquery user $user --attribute _Gid`);
+
+        if($localuid != $netuid)
+        {
+            if($test)
+            {
+                printf("%s%-13s %s%-13s %-10s %-15s", $localuid,"($user)",$netuid,"($user)",'Use Zone ID',$netuid);
+                print "\n";
+            }
+            else
+            {
+                ChangeID($user, $netuid, $netgid);
+            }
+        }
+    }
+
+    if($test)
+    {
+        print "\n\n";
+    }
+}
+
 #
 # validate specified users, and filter out the illegal users.
 # illegal users would be classified by errors (User not exist, Home not exist)
@@ -81,11 +169,6 @@ sub GetAllUsers()
     @nohome = ();
     foreach my $user (glob("$HomeRoot/*"))
     {
-        if(-f $user)
-        {
-            next;
-        }
-
         $user =~ s#^$HomeRoot/##;
         my $home_path = File::Spec->catfile($HomeRoot,$user);
         chomp $home_path;
@@ -99,7 +182,14 @@ sub GetAllUsers()
             push(@all_user,$user);
             #initialize the uid hash table.
             $home_uid = (stat($home_path))[4];
-            chomp ($new_uid = getpwnam($user));
+            if(IsNetworkUser($user))
+            {
+                chomp ($new_uid = `adquery user $user --attribute _Uid`);
+            }
+            else
+            {
+                chomp($new_uid = getpwnam($user));
+            }
             $uidmap{$home_uid} = $new_uid if($home_uid != $new_uid);
         }
     }
@@ -124,17 +214,25 @@ sub FixHome
     #Display the uid map
     if($test)
     {
-        printf("%-15s %-30s %-30s %-30s\n",'User','Home','UID Map','GID Map');
+        printf("%-15s %-25s %-30s %-30s\n",'User','Home','UID Map','GID Map');
         foreach my $user (@_)
         {
             $home_path = File::Spec->catfile($HomeRoot,$user);
-            ($new_uid,$new_gid) = (getpwnam($user))[2,3];
+            if(IsNetworkUser($user))
+            {
+                chomp($new_uid = `adquery user $user --attribute _Uid`);
+                chomp($new_gid = `adquery user $user --attribute _Gid`);
+            }
+            else
+            {
+                ($new_uid,$new_gid) = (getpwnam($user))[2,3];
+            }
             ($prev_uid,$prev_gid) = (stat("$home_path"))[4,5];
             if($new_uid == $prev_uid && $new_gid == $prev_gid)
             {
                 next;
             }
-            printf("%-15s %-30s ",$user,$home_path);
+            printf("%-15s %-25s ",$user,$home_path);
             printf("%-30s ",$prev_uid.'=>'.$new_uid);
             printf("%-30s",$prev_gid.'=>'.$new_gid) unless($uidonly);
             print "\n";
@@ -146,7 +244,15 @@ sub FixHome
     {
         my @files;#Array to store all the files under the home directory
         $home_path = File::Spec->catfile($HomeRoot,$user);
-        ($new_uid,$new_gid) = (getpwnam($user))[2,3];
+        if(IsNetworkUser($user))
+        {
+            chomp($new_uid = `adquery user $user --attribute _Uid`);
+            chomp($new_gid = `adquery user $user --attribute _Gid`);
+        }
+        else
+        {
+            ($new_uid,$new_gid) = (getpwnam($user))[2,3];
+        }
         ($prev_uid,$prev_gid) = (stat("$home_path"))[4,5];
         #Home's mode is correct, don't need to be fixed.
         if($new_uid == $prev_uid && $new_gid == $prev_gid)
@@ -187,6 +293,7 @@ sub FixHome
 sub FixFiles($$$$$)
 {
     my ($new_uid,$new_gid,$prev_uid,$prev_gid,$files) = @_;
+    my $chown = "chown";
     foreach my $file (@{$files})
     {
         chomp $file;
@@ -202,26 +309,27 @@ sub FixFiles($$$$$)
 
         if(-l $file and !$follow)
         {
-            #if not followd symbolic link, just skip the symbolic file
-            next;
+            #print "<symlink found> $file\n";
+            # Fix the link itself and no traverse.
+            ($file_uid,$file_gid) = (lstat($file))[4,5];
+            $chown.=" -h ";
         }
-        
 
         #print "<symlink found> $file\n" if( -l $file);
         if($prev_uid == $file_uid && $prev_gid == $file_gid)
         {
-            $uidonly?chown($new_uid, -1, $filename)
-                    :chown($new_uid, $new_gid, $filename);
+            $uidonly?system "$chown $new_uid $filename"
+                    :system "$chown $new_uid:$new_gid $filename";
         }
         else
         {
             if(exists $uidmap{$file_uid})
             {
-                 chown $uidmap{$file_uid}, -1, $filename;
+                 system "$chown $uidmap{$file_uid} $filename";
             }
             if($prev_gid == $file_gid)
             {
-                 chown(-1, $new_gid, $filename) unless($uidonly);
+                 system "$chown :$new_gid $filename" unless($uidonly);
             }
         } 
     }
@@ -318,6 +426,9 @@ if(@include)
 
     #initilize the the uidmap;
     GetAllUsers();
+
+    #fix the conflict target
+    FixConflictID(@targets);
     
     #fix the directory
     FixHome(@targets);
@@ -379,11 +490,19 @@ elsif(@exclude)
         push(@targets,$alltargets[$i]);
         $i++;
     }
+
+    #fix conflict target
+    FixConflictID(@targets);
+
     FixHome(@targets);
 }
 else
 {
     my @targets = GetAllUsers();
+    
+    #fix conflict target
+    FixConflictID(@targets);
+
     FixHome(@targets);
 }
 
