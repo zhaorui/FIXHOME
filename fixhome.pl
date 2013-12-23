@@ -33,6 +33,64 @@ sub Usage
     $help?exit 0:exit 1;
 }
 
+# This function is used to get the history and future UID/GID of the home folder, which
+# are the basic information needed by fixing.
+#
+# $_[0]     Owner of the home
+# $_[1]     Home folder location
+# $_[2]     Reference of previous home UID
+# $_[3]     Reference of previous home GID
+# $_[4]     Reference of future home UID
+# $_[5]     Reference of future home GID
+#
+sub GetCurSituation($$$$$$)
+{
+    my ($user,$home_path,$prev_uid_ref,$prev_gid_ref,$new_uid_ref,$new_gid_ref) = @_;
+    my $local_uid;
+    my $local_gid;
+    my $network_uid;
+    my $network_gid;
+
+    ($$prev_uid_ref,$$prev_gid_ref) = (stat("$home_path"))[4,5];
+   
+    #Standard Local User
+    if(!IsADUser($user))
+    {
+        ($$new_uid_ref,$$new_gid_ref) = (getpwnam($user))[2,3];
+    }
+    else
+    {
+        chomp($network_uid = `adquery user $user --attribute _Uid`);
+        chomp($network_gid = `adquery user $user --attribute _Gid`);
+
+        #In Mac, once if conflict account appear, only the local account could login 
+        #to the system. It's exactly the opposite behavior compared with UNIX/LINUX.
+        #So when in such situation, we should use local UID/GID as the future home ownership.
+        if($OSNAME eq "darwin")
+        {
+            system "dscl /Local/Default -read /Users/$user UniqueID > /dev/null 2>&1";
+            if($? == 0)
+            {
+                chomp($local_uid = `dscl /Local/Default -read /Users/$user UniqueID`);
+                chomp($local_gid = `dscl /Local/Default -read /Users/$user PrimaryGroupID`);
+                $local_uid=~ s/^UniqueID: //;
+                $local_gid=~ s/^PrimaryGroupID: //;
+                #UID/GID conflict detected and it's not a mobile user,
+                #because mobile user's account would be fixed in function "FixMobileAccount"
+                if(($local_uid != $network_gid) || ($local_gid != $network_gid))
+                {
+                    $$new_uid_ref = $local_uid;
+                    $$new_gid_ref = $local_gid;
+                    return;
+                }
+            }
+        }
+
+        $$new_uid_ref = $network_uid;
+        $$new_gid_ref = $network_gid;
+    }
+}
+
 # Detect if a user is a network user
 # if it's network user reutrn 1, else return 0
 #
@@ -41,7 +99,8 @@ sub Usage
 sub IsADUser($)
 {
     my $user = $_[0];
-    if(!defined($user))
+    $user =~ s/^\s*//;
+    if($user eq "")
     {
         return 0;
     }
@@ -49,42 +108,7 @@ sub IsADUser($)
     return !$?;
 }
 
-# Obtain home folder name from the user's name, this function support UPN format username.
-# Usually, home folder name is same with user's name, unless user's name have one of these
-# character "/\[]:;|=,+*?<>@". These character would be instead by "_" in their folder name.
-# 
-# $_[0]:    user'name
-# ret:      full path of user's home folder
-sub GetHomeName($)
-{
-    my $home_name = $_[0];
-    my $upn_prefix;
-    my $home_path;
-    my $tmp_home_name = $home_name;
-    $tmp_home_name =~ s/[\/\\\[\]:;|=,+*?<>@]/_/g;
-
-    #Support UPN for user's name
-    if ($home_name =~ /(.*)@.*$/)
-    {
-        my $upn_prefix=$1;
-        #deal with cross-forest user
-        if(!IsADUser($tmp_home_name))
-        {
-            $upn_prefix =~ s/[\/\\\[\]:;|=,+*?<>@]/_/g;
-            $home_name=$upn_prefix;
-            $home_path = File::Spec->catfile($HomeRoot,$home_name);
-            return $home_path;
-        }
-    }
-
-    #deal with current-forest user
-    $home_name=$tmp_home_name;
-    $home_path = File::Spec->catfile($HomeRoot,$home_name);
-    return $home_path;
-}
-
-# Changing user's local uid/gid at all platform.
-# This function is only Darwin platform
+# Change mobile user's uid/gid. This function is only for Darwin
 # 
 # $_[0]:    user's name
 # $_[1]:    user's new uid
@@ -92,10 +116,7 @@ sub GetHomeName($)
 #
 sub ChangeID($$$)
 {
-    my $user = $_[0];
-    my $uid  = $_[1];
-    my $gid  = $_[2];
-
+    my ($user,$uid,$gid) = @_;
     if($OSNAME ne "darwin")
     {
         return;
@@ -112,17 +133,21 @@ sub ChangeID($$$)
     system "dscl /Local/Default -create /Users/$user PrimaryGroupID $gid";
 }
 
-# Fix the user's conflict local uid and network uid.
-# The conlict happens when mobile user use new uid/gid shceme.
-# This funciton is only Darwin platform
+# In Mac, mobile user have a network UID/GID and a local UID/GID, normally they should
+# be the same number. However, when we generate UID/GID in a new scheme, only the network
+# UID/GID would be changed to the new one. This would cause a conlict UID/GID issue.
+# Before fixing the home folder of a mobile user, this issue must be solved first.
+#
+# Mobile account only exist on Mac, this function would NOT affect any other platfroms.
 #
 #  @_:      users
 #
-sub FixConflictID
+sub FixMobileAccount
 {
-    my $localuid;
-    my $netuid;
-    my $netgid;
+    my $local_uid;
+    my $local_gid;
+    my $net_uid;
+    my $net_gid;
 
     # This funciton is only used to fix the "different value return from 'id' and 'adquery user'"
     # problem, this problem only happen on Mac when use mobile user account.
@@ -133,39 +158,45 @@ sub FixConflictID
 
     if($test)
     {
-        printf("%-23s %-23s %-12s %-12s\n",'LocalUid(Name/Map)','Zone UID(Name/Map)','Resolution','ID Map');
+        printf("%-20s %-20s %-10s %-8s %-12s %-12s\n",'LocalUID(Name/Map)','ZoneUID(Name/Map)','LocalGID','ZoneGID','Resolution','ID Map');
     }
 
     foreach my $user (@_)
     {
-        # conflict uid only happend at network user, if it's not, skip it.
-        if(!IsADUser($user))
+        #check if user is mobile user, if not skip it.
+        my $ret = `dscl /Local/Default -mcxread /Users/$user com.apple.MCX com.apple.cachedaccounts.CreateAtLogin 2> /dev/null`;
+        if(($?!=0)&&($ret ne ""))
         {
             next;
         }
-        
-        # skip the AD user who don't have a local uid.
-        system "dscl /Local/Default -read /Users/$user UniqueID > /dev/null 2>&1";
-        if($? != 0)
+        else
         {
-            next;
+            chomp(my $ret = `dscl /Local/Default -read /Users/$user OriginalAuthenticationAuthority 2> /dev/null`);
+            $ret =~ s/OriginalAuthenticationAuthority: //;
+            if($ret ne "CentrifyDC")
+            {
+                #print "NOKEY: $user  $ret\n";
+                next;
+            }
         }
 
-        chomp($localuid = `dscl /Local/Default -read /Users/$user UniqueID`);
-        $localuid =~ s/UniqueID: //;
-        chomp($netuid = `adquery user $user --attribute _Uid`);
-        chomp($netgid = `adquery user $user --attribute _Gid`);
+        chomp($local_uid = `dscl /Local/Default -read /Users/$user UniqueID`);
+        chomp($local_gid = `dscl /Local/Default -read /Users/$user PrimaryGroupID`);
+        chomp($net_uid = `adquery user $user --attribute _Uid`);
+        chomp($net_gid = `adquery user $user --attribute _Gid`);
+        $local_uid =~ s/UniqueID: //;
+        $local_gid =~ s/PrimaryGroupID: //;
 
-        if($localuid != $netuid)
+        if(($local_uid != $net_uid) || ($local_gid != $net_gid))
         {
             if($test)
             {
-                printf("%-23s %-23s %-12s %-12s", $localuid."($user)",$netuid."($user)",'Use Zone ID',$netuid);
-                print "\n";
+                printf("%-20s %-20s %-10s %-8s %-12s %-12s\n", $local_uid."($user)",$net_uid."($user)",
+                $local_gid,$net_gid,'Use Zone ID',$net_uid);
             }
             else
             {
-                ChangeID($user, $netuid, $netgid);
+                ChangeID($user, $net_uid, $net_gid);
             }
         }
     }
@@ -177,9 +208,9 @@ sub FixConflictID
 }
 
 #
-# This function is mainly used to filter out illegal users which be specified after
-# the -i or -e option. Illegal users would be classified by errors (User not exist, 
-# Home not exist) and would be placed into @nouser or @nohome respectively.
+# validate specified users, and filter out the illegal users.
+# illegal users would be classified by errors (User not exist, Home not exist)
+# and would be placed into @nouser or @nohome respectively.
 #
 #   @_:     users
 #   ret:    sorted legal user array
@@ -189,10 +220,9 @@ sub FilterUsers
     @nouser = ();
     @nohome = ();
     my @legal_user = ();
-    my $home_path;
     foreach my $user (@_)
     {
-        $home_path = GetHomeName($user);
+        my $home_path = File::Spec->catfile($HomeRoot,$user);
         if(! defined getpwnam($user))
         {
             push(@nouser,$user);
@@ -219,8 +249,11 @@ sub FilterUsers
 sub GetAllUsers()
 {
     my @all_user = ();
-    my $home_uid;
     my $new_uid;
+    my $new_gid;
+    my $prev_uid;
+    my $prev_gid;
+    my $home_path;
     @nouser = ();
     @nohome = ();
     foreach my $user (glob("$HomeRoot/*"))
@@ -231,7 +264,7 @@ sub GetAllUsers()
         }
 
         $user =~ s#^$HomeRoot/##;
-        my $home_path = File::Spec->catfile($HomeRoot,$user);
+        $home_path = File::Spec->catfile($HomeRoot,$user);
         chomp $home_path;
         chomp $user;
         if(!defined getpwnam($user))
@@ -242,16 +275,8 @@ sub GetAllUsers()
         {
             push(@all_user,$user);
             #initialize the uid hash table.
-            $home_uid = (stat($home_path))[4];
-            if(IsADUser($user))
-            {
-                chomp ($new_uid = `adquery user $user --attribute _Uid`);
-            }
-            else
-            {
-                chomp($new_uid = getpwnam($user));
-            }
-            $uidmap{$home_uid} = $new_uid if($home_uid != $new_uid);
+            GetCurSituation($user,$home_path,\$prev_uid,\$prev_gid,\$new_uid,\$new_gid);
+            $uidmap{$prev_uid} = $new_uid if($prev_uid != $new_uid);
         }
     }
     return sort @all_user;
@@ -272,8 +297,10 @@ sub FixHome
     my $prev_gid;   #user's previous gid, assume it's the same with user's home gid
     my $home_path;
    
-    # Before fix user's home, fix the conlict uid/gid first.
-    FixConflictID(@_);
+    # Fix the mobile user's account, make their local UID/GID same with their network one.
+    # Mobile account only exist in Mac. For other platform, This function
+    # would be automatically skipped.
+    FixMobileAccount(@_);
 
     #Display the uid map
     if($test)
@@ -281,17 +308,8 @@ sub FixHome
         printf("%-11s %-18s %-30s %-30s\n",'User','Home','UID Map','GID Map');
         foreach my $user (@_)
         {
-            $home_path = GetHomeName($user);
-            if(IsADUser($user))
-            {
-                chomp($new_uid = `adquery user $user --attribute _Uid`);
-                chomp($new_gid = `adquery user $user --attribute _Gid`);
-            }
-            else
-            {
-                ($new_uid,$new_gid) = (getpwnam($user))[2,3];
-            }
-            ($prev_uid,$prev_gid) = (stat("$home_path"))[4,5];
+            $home_path = File::Spec->catfile($HomeRoot,$user);
+            GetCurSituation($user,$home_path,\$prev_uid,\$prev_gid,\$new_uid,\$new_gid);
             if($new_uid == $prev_uid && $new_gid == $prev_gid)
             {
                 next;
@@ -307,18 +325,8 @@ sub FixHome
     foreach my $user (@_)
     {
         my @files;#Array to store all the files under the home directory
-        $home_path = GetHomeName($user);
-
-        if(IsADUser($user))
-        {
-            chomp($new_uid = `adquery user $user --attribute _Uid`);
-            chomp($new_gid = `adquery user $user --attribute _Gid`);
-        }
-        else
-        {
-            ($new_uid,$new_gid) = (getpwnam($user))[2,3];
-        }
-        ($prev_uid,$prev_gid) = (stat("$home_path"))[4,5];
+        $home_path = File::Spec->catfile($HomeRoot,$user);
+        GetCurSituation($user,$home_path,\$prev_uid,\$prev_gid,\$new_uid,\$new_gid);
         #Home's mode is correct, don't need to be fixed.
         if($new_uid == $prev_uid && $new_gid == $prev_gid)
         {
