@@ -122,8 +122,9 @@ sub ChangeID($$$)
         return;
     }
 
+    $user =~ s/^\s*//;
     # validate the inputs
-    if(!($uid =~ /^[0-9]+$/) || !($gid =~ /^[0-9]+$/) || !defined($user))
+    if(!($uid =~ /^[0-9]+$/) || !($gid =~ /^[0-9]+$/) || ($user ne ""))
     {
         print "Could not change UID/GID($uid/$gid) for $user";
         return;
@@ -182,10 +183,23 @@ sub FixMobileAccount
 
         chomp($local_uid = `dscl /Local/Default -read /Users/$user UniqueID`);
         chomp($local_gid = `dscl /Local/Default -read /Users/$user PrimaryGroupID`);
-        chomp($net_uid = `adquery user $user --attribute _Uid`);
-        chomp($net_gid = `adquery user $user --attribute _Gid`);
+        chomp($net_uid = `adquery user $user --attribute _Uid 2> /dev/null`);
+        chomp($net_gid = `adquery user $user --attribute _Gid 2> /dev/null`);
         $local_uid =~ s/UniqueID: //;
         $local_gid =~ s/PrimaryGroupID: //;
+
+        if(($net_uid=="")||($net_gid=""))
+        {
+            if($test)
+            {
+                printf("%-20s %-20s %-10s %-8s %-12s %-12s\n", $local_uid."($user)",$net_uid."($user)",
+                $local_gid,$net_gid,'will NOT fix',$local_uid);
+            }
+            else
+            {
+                next;
+            }
+        }
 
         if(($local_uid != $net_uid) || ($local_gid != $net_gid))
         {
