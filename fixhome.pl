@@ -6,7 +6,8 @@ use File::Find;
 use English qw( -no_match_vars );
 
 my %uidmap;         #The hash table, maps old uid to new uid
-my @nouser;         #list of users not found in system, and contain the result from FilterUsers, GetAllUsers
+my @localuser;      #list of local user, also the result container of FilterUsers, GetAllUsers
+my @nouser;         #list of non-exist user, and contain the result from FilterUsers, GetAllUsers
 my @nohome;         #list of user who don't have home directory, and contain the result from FilterUsers,GetAllUsers
 my $HomeRoot;       #The Root of User's home directory, could be specified by -d option
 my @include;        #list of include user by -i option
@@ -52,43 +53,8 @@ sub GetCurSituation($$$$$$)
     my $network_gid;
 
     ($$prev_uid_ref,$$prev_gid_ref) = (stat("$home_path"))[4,5];
-   
-    #Standard Local User
-    if(!IsADUser($user))
-    {
-        ($$new_uid_ref,$$new_gid_ref) = (getpwnam($user))[2,3];
-    }
-    else
-    {
-        chomp($network_uid = `adquery user $user --attribute _Uid`);
-        chomp($network_gid = `adquery user $user --attribute _Gid`);
-
-        #In Mac, once if conflict account appear, only the local account could login 
-        #to the system. It's exactly the opposite behavior compared with UNIX/LINUX.
-        #So when in such situation, we should use local UID/GID as the future home ownership.
-        if($OSNAME eq "darwin")
-        {
-            system "dscl /Local/Default -read /Users/$user UniqueID > /dev/null 2>&1";
-            if($? == 0)
-            {
-                chomp($local_uid = `dscl /Local/Default -read /Users/$user UniqueID`);
-                chomp($local_gid = `dscl /Local/Default -read /Users/$user PrimaryGroupID`);
-                $local_uid=~ s/^UniqueID: //;
-                $local_gid=~ s/^PrimaryGroupID: //;
-                #UID/GID conflict detected and it's not a mobile user,
-                #because mobile user's account would be fixed in function "FixMobileAccount"
-                if(($local_uid != $network_gid) || ($local_gid != $network_gid))
-                {
-                    $$new_uid_ref = $local_uid;
-                    $$new_gid_ref = $local_gid;
-                    return;
-                }
-            }
-        }
-
-        $$new_uid_ref = $network_uid;
-        $$new_gid_ref = $network_gid;
-    }
+    chomp($$new_uid_ref = `adquery user $user --attribute _Uid`);
+    chomp($$new_gid_ref = `adquery user $user --attribute _Gid`);
 }
 
 # Detect if a user is a network user
@@ -124,9 +90,9 @@ sub ChangeID($$$)
 
     $user =~ s/^\s*//;
     # validate the inputs
-    if(!($uid =~ /^[0-9]+$/) || !($gid =~ /^[0-9]+$/) || ($user ne ""))
+    if(!($uid =~ /^[0-9]+$/) || !($gid =~ /^[0-9]+$/) || ($user eq ""))
     {
-        print "Could not change UID/GID($uid/$gid) for $user";
+        print "Could not change UID/GID($uid/$gid) for $user\n";
         return;
     }
 
@@ -187,16 +153,6 @@ sub FixMobileAccount
         $local_uid =~ s/UniqueID: //;
         $local_gid =~ s/PrimaryGroupID: //;
 
-        if(($net_uid == "") || ($net_gid == ""))
-        {
-            if($test)
-            {
-                printf("%-20s %-20s %-10s %-8s %-12s %-12s\n", $local_uid."($user)",$net_uid."($user)",
-                $local_gid,$net_gid,'will NOT fix',$local_uid);
-            }
-            next;
-        }
-
         if(($local_uid != $net_uid) || ($local_gid != $net_gid))
         {
             if($test)
@@ -227,15 +183,21 @@ sub FixMobileAccount
 #
 sub FilterUsers
 {
-    @nouser = ();
-    @nohome = ();
+    @localuser = ();
+    @nouser    = ();
+    @nohome    = ();
     my @legal_user = ();
+
     foreach my $user (@_)
     {
         my $home_path = File::Spec->catfile($HomeRoot,$user);
-        if(! defined getpwnam($user))
+        if(!defined getpwnam($user))
         {
             push(@nouser,$user);
+        }
+        elsif(!IsADUser($user))
+        {
+            push(@localuser,$user);
         }
         elsif(! -d $home_path) #Home Prefix
         {
@@ -264,8 +226,10 @@ sub GetAllUsers()
     my $prev_uid;
     my $prev_gid;
     my $home_path;
+    @localuser = ();
     @nouser = ();
     @nohome = ();
+
     foreach my $user (glob("$HomeRoot/*"))
     {
         if(!-d $user)
@@ -277,9 +241,15 @@ sub GetAllUsers()
         $home_path = File::Spec->catfile($HomeRoot,$user);
         chomp $home_path;
         chomp $user;
+
+        #script only fix AD user now, we'll skip those local user.
         if(!defined getpwnam($user))
         {
             push(@nouser,$user);
+        }
+        elsif(!IsADUser($user))
+        {
+            push(@localuser,$user);
         }
         else
         {
@@ -495,10 +465,15 @@ if(@include)
     my @targets = FilterUsers(@include);
     if(@nouser)
     {
-        print "<Error>\nUsers list below were not found in the system.\n\t".
+        print "<Warning>\nUsers list below DO NOT exist.\n\t".
               join("\n\t",@nouser)."\n".
-              "Please check if the user names are entered correctly.\n\n";
-        exit 1;
+              "Please check if the user names are entered correctly,and make sure it is Active Directory User\n\n";
+    }
+    if(@localuser)
+    {
+        print "<Warning>\nUsers list below is local user, which would be skipped.\n\t".
+              join("\n\t",@localuser)."\n".
+              "Only the Active Directory User's home folder could be fixed."
     }
     if(@nohome)
     {
@@ -506,7 +481,6 @@ if(@include)
               join("\n\t",@nohome)."\n ".
               "These users will be skipped.\n\n";
     }
-
 
     #fix the directory
     FixHome(@targets);
@@ -523,7 +497,7 @@ elsif(@exclude)
     }
     if(@nouser)
     {
-        print "<Warning>\nOwners of the home directories list below were not found in the system.\n\t".
+        print "<Warning>\nOwners of the home directories list below were not found in the domain.\n\t".
               join("\n\t",@nouser)."\nThese home directories will be skipped.\n\n";
     }
 
@@ -531,7 +505,7 @@ elsif(@exclude)
     my @extarget = FilterUsers(@exclude);
     if(@nouser)
     {
-        print "<Warning>\nUsers list below were not found in the system.\n\t".
+        print "<Warning>\nUsers which you specify below DO NOT exist.\n\t".
               join("\n\t",@nouser)."\nPlease check if the user names are entered correctly.\n\n ";
     }
     if(@nohome)
