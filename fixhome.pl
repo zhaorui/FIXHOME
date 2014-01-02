@@ -165,8 +165,8 @@ sub FixMobileAccount
     foreach my $user (@_)
     {
         #check if user is mobile user, if not skip it.
-        my $ret = `dscl /Local/Default -mcxread /Users/$user com.apple.MCX com.apple.cachedaccounts.CreateAtLogin 2> /dev/null`;
-        if(($?!=0)&&($ret ne ""))
+        system "dscl /Local/Default -mcxread /Users/$user com.apple.MCX 2> /dev/null | grep com.apple.cachedaccounts.CreateAtLogin > /dev/null";
+        if($?!=0)
         {
             next;
         }
@@ -176,7 +176,6 @@ sub FixMobileAccount
             $ret =~ s/OriginalAuthenticationAuthority: //;
             if($ret ne "CentrifyDC")
             {
-                #print "NOKEY: $user  $ret\n";
                 next;
             }
         }
@@ -188,17 +187,14 @@ sub FixMobileAccount
         $local_uid =~ s/UniqueID: //;
         $local_gid =~ s/PrimaryGroupID: //;
 
-        if(($net_uid=="")||($net_gid=""))
+        if(($net_uid == "") || ($net_gid == ""))
         {
             if($test)
             {
                 printf("%-20s %-20s %-10s %-8s %-12s %-12s\n", $local_uid."($user)",$net_uid."($user)",
                 $local_gid,$net_gid,'will NOT fix',$local_uid);
             }
-            else
-            {
-                next;
-            }
+            next;
         }
 
         if(($local_uid != $net_uid) || ($local_gid != $net_gid))
