@@ -6,6 +6,8 @@ use File::Find;
 use English qw( -no_match_vars );
 
 my %uidmap;         #The hash table, maps old uid to new uid
+my %aduser_info;    #key is ad user's name, value is array which contains name, passwd,uid/gid,gecos,home path,and shell.
+my @mobileuser;     #list of mobile user, mobile user is only exist in darwin, this array will be filled by subrotine FixMobileAccount
 my @localuser;      #list of local user, also the result container of FilterUsers, GetAllUsers
 my @nouser;         #list of non-exist user, and contain the result from FilterUsers, GetAllUsers
 my @nohome;         #list of user who don't have home directory, and contain the result from FilterUsers,GetAllUsers
@@ -44,18 +46,20 @@ sub Usage
 # $_[4]     Reference of future home UID
 # $_[5]     Reference of future home GID
 #
-sub GetCurSituation($$$$$$)
-{
-    my ($user,$home_path,$prev_uid_ref,$prev_gid_ref,$new_uid_ref,$new_gid_ref) = @_;
-    my $local_uid;
-    my $local_gid;
-    my $network_uid;
-    my $network_gid;
-
-    ($$prev_uid_ref,$$prev_gid_ref) = (stat("$home_path"))[4,5];
-    chomp($$new_uid_ref = `adquery user $user --attribute _Uid`);
-    chomp($$new_gid_ref = `adquery user $user --attribute _Gid`);
-}
+#sub GetCurSituation($$$$$$)
+#{
+#    my ($user,$home_path,$prev_uid_ref,$prev_gid_ref,$new_uid_ref,$new_gid_ref) = @_;
+#    my $local_uid;
+#    my $local_gid;
+#    my $network_uid;
+#    my $network_gid;
+#
+#    ($$prev_uid_ref,$$prev_gid_ref) = (stat("$home_path"))[4,5];
+#    chomp($$new_uid_ref = `adquery user $user --attribute _Uid`);
+#    chomp($$new_gid_ref = `adquery user $user --attribute _Gid`);
+#
+#    
+#}
 
 # Detect if a user is a network user
 # if it's network user reutrn 1, else return 0
@@ -70,8 +74,7 @@ sub IsADUser($)
     {
         return 0;
     }
-    system "adquery user $user > /dev/null 2>&1";
-    return !$?;
+    return exists $aduser_info{$user};
 }
 
 # Change mobile user's uid/gid. This function is only for Darwin
@@ -100,6 +103,59 @@ sub ChangeID($$$)
     system "dscl /Local/Default -create /Users/$user PrimaryGroupID $gid";
 }
 
+#In Mac, once if conflict account appear, only the local account could login 
+#to the system. It's exactly the opposite behavior compared with UNIX/LINUX.
+#When fixing home with the AD UID, it would cause local user couldn't login to the system.
+#So when in such situation, we need to tell customer the conflict account in darwin.
+sub CheckAccountConflict
+{
+    my $local_uid;
+    my $local_gid;
+    my $new_uid;
+    my $new_gid;
+    my $found = 0;
+
+    if($OSNAME ne "darwin")
+    {
+        return;
+    }
+
+    #turn @mobileuser to a map, so we could check if a user is mobile account quickly.
+    my %mobilemap = map {$_ => 1} @mobileuser;
+
+    foreach my $user (@_)
+    {
+        #skip the mobile user account.
+        if(exists $mobilemap{$user})
+        {
+            next;
+        }
+
+        system "dscl /Local/Default -read /Users/$user UniqueID > /dev/null 2>&1";
+        if($? == 0)
+        {
+            chomp($local_uid = `dscl /Local/Default -read /Users/$user UniqueID`);
+            chomp($local_gid = `dscl /Local/Default -read /Users/$user PrimaryGroupID`);
+            $local_uid=~ s/^UniqueID: //;
+            $local_gid=~ s/^PrimaryGroupID: //;
+            ($new_uid,$new_gid) = @{$aduser_info{$user}}[2,3];
+            
+            #conflict account detected
+            if(($local_uid != $new_uid) || ($local_gid != $new_gid))
+            {
+                if($found == 0)
+                {
+                    $found = 1;
+                    print "Conflict account has been detected, this may cause problem for user login!\n";
+                    printf("%-10s %-10s %-10s %-10s %-10s %s\n",'Name','LocalUID','ZoneUID','LocalGID','ZoneGID','Home');
+                }
+                printf("%-10s %-10s %-10s %-10s %-10s %s\n",$user,$local_uid,$new_uid,$local_gid,$new_gid,$aduser_info{$user}[5]);
+            }
+        }
+    }
+    print("\n") if $found != 0 ;
+}
+
 # In Mac, mobile user have a network UID/GID and a local UID/GID, normally they should
 # be the same number. However, when we generate UID/GID in a new scheme, only the network
 # UID/GID would be changed to the new one. This would cause a conlict UID/GID issue.
@@ -115,17 +171,13 @@ sub FixMobileAccount
     my $local_gid;
     my $net_uid;
     my $net_gid;
+    my $found = 0;
 
     # This funciton is only used to fix the "different value return from 'id' and 'adquery user'"
     # problem, this problem only happen on Mac when use mobile user account.
     if($OSNAME ne "darwin")
     {
         return;
-    }
-
-    if($test)
-    {
-        printf("%-20s %-20s %-10s %-8s %-12s %-12s\n",'LocalUID(Name/Map)','ZoneUID(Name/Map)','LocalGID','ZoneGID','Resolution','ID Map');
     }
 
     foreach my $user (@_)
@@ -146,10 +198,13 @@ sub FixMobileAccount
             }
         }
 
+        #It is mobile user, now get its local UID/GID and network UID/GID
         chomp($local_uid = `dscl /Local/Default -read /Users/$user UniqueID`);
         chomp($local_gid = `dscl /Local/Default -read /Users/$user PrimaryGroupID`);
-        chomp($net_uid = `adquery user $user --attribute _Uid 2> /dev/null`);
-        chomp($net_gid = `adquery user $user --attribute _Gid 2> /dev/null`);
+        #chomp($net_uid = `adquery user $user --attribute _Uid 2> /dev/null`);
+        #chomp($net_gid = `adquery user $user --attribute _Gid 2> /dev/null`);
+        $net_uid = $aduser_info{$user}[2];
+        $net_gid = $aduser_info{$user}[3];
         $local_uid =~ s/UniqueID: //;
         $local_gid =~ s/PrimaryGroupID: //;
 
@@ -157,6 +212,11 @@ sub FixMobileAccount
         {
             if($test)
             {
+                if($found == 0)
+                {
+                    $found = 1;
+                    printf("%-20s %-20s %-10s %-8s %-12s %-12s\n",'LocalUID(Name/Map)','ZoneUID(Name/Map)','LocalGID','ZoneGID','Resolution','ID Map');
+                }
                 printf("%-20s %-20s %-10s %-8s %-12s %-12s\n", $local_uid."($user)",$net_uid."($user)",
                 $local_gid,$net_gid,'Use Zone ID',$net_uid);
             }
@@ -164,12 +224,13 @@ sub FixMobileAccount
             {
                 ChangeID($user, $net_uid, $net_gid);
             }
+            push @mobileuser, $user;
         }
     }
 
-    if($test)
+    if($test && $found != 0)
     {
-        print "\n\n";
+        print "\n";
     }
 }
 
@@ -255,7 +316,9 @@ sub GetAllUsers()
         {
             push(@all_user,$user);
             #initialize the uid hash table.
-            GetCurSituation($user,$home_path,\$prev_uid,\$prev_gid,\$new_uid,\$new_gid);
+            ($prev_uid,$prev_gid) = (stat($home_path))[4,5];
+            ($new_uid,$new_gid) = (@{$aduser_info{$user}})[2,3];
+            #GetCurSituation($user,$home_path,\$prev_uid,\$prev_gid,\$new_uid,\$new_gid);
             $uidmap{$prev_uid} = $new_uid if($prev_uid != $new_uid);
         }
     }
@@ -276,37 +339,51 @@ sub FixHome
     my $prev_uid;   #user's previous uid, assume it's the same with user's home uid
     my $prev_gid;   #user's previous gid, assume it's the same with user's home gid
     my $home_path;
+    my $found = 0;
    
     # Fix the mobile user's account, make their local UID/GID same with their network one.
     # Mobile account only exist in Mac. For other platform, This function
     # would be automatically skipped.
     FixMobileAccount(@_);
 
+    #Before call this funciton, need to make sure there's no Moblie user in the list, to
+    #avoid false alarm of conflict account.
+    CheckAccountConflict(@_);
+
     #Display the uid map
     if($test)
     {
-        printf("%-11s %-18s %-30s %-30s\n",'User','Home','UID Map','GID Map');
         foreach my $user (@_)
         {
             $home_path = File::Spec->catfile($HomeRoot,$user);
-            GetCurSituation($user,$home_path,\$prev_uid,\$prev_gid,\$new_uid,\$new_gid);
+            #GetCurSituation($user,$home_path,\$prev_uid,\$prev_gid,\$new_uid,\$new_gid);
+            ($prev_uid,$prev_gid) = (stat($home_path))[4,5];
+            ($new_uid,$new_gid) = (@{$aduser_info{$user}})[2,3];
             if($new_uid == $prev_uid && $new_gid == $prev_gid)
             {
                 next;
+            }
+            if($found == 0)
+            {
+                $found = 1;
+                printf("%-11s %-18s %-30s %-30s\n",'User','Home','UID Map','GID Map');
             }
             printf("%-11s %-18s ",$user,$home_path);
             printf("%-30s ",$prev_uid.'=>'.$new_uid);
             printf("%-30s",$prev_gid.'=>'.$new_gid) unless($uidonly);
             print "\n";
         }
-        print "\n\n";
+        print "\n" if $found != 0;
         return;
     }
+
     foreach my $user (@_)
     {
         my @files;#Array to store all the files under the home directory
         $home_path = File::Spec->catfile($HomeRoot,$user);
-        GetCurSituation($user,$home_path,\$prev_uid,\$prev_gid,\$new_uid,\$new_gid);
+        #GetCurSituation($user,$home_path,\$prev_uid,\$prev_gid,\$new_uid,\$new_gid);
+        ($prev_uid,$prev_gid) = (stat($home_path))[4,5];
+        ($new_uid,$new_gid) = (@{$aduser_info{$user}})[2,3];
         #Home's mode is correct, don't need to be fixed.
         if($new_uid == $prev_uid && $new_gid == $prev_gid)
         {
@@ -454,6 +531,22 @@ if(@include && @exclude)
 {
     print "Option -i and -e could not be used at the same time.\n\n";
     Usage();
+}
+
+# initialize the aduser_info hash table.
+# username: $aduser_info{"xxx"}[0]
+# passwd:   $aduser_info{"xxx"}[1]
+# uid:      $aduser_info{"xxx"}[2]
+# gid:      $aduser_info{"xxx"}[3]
+# gecos:    $aduser_info{"xxx"}[4]
+# home:     $aduser_info{"xxx"}[5]
+# shell:    $aduser_info{"xxx"}[6]
+my @adquery_result = `adquery user`;
+for (@adquery_result)
+{
+    chomp;
+    my @data = split/:/;
+    $aduser_info{$data[0]} = [@data];
 }
 
 if(@include)
