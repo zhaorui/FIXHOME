@@ -36,31 +36,6 @@ sub Usage
     $help?exit 0:exit 1;
 }
 
-# This function is used to get the history and future UID/GID of the home folder, which
-# are the basic information needed by fixing.
-#
-# $_[0]     Owner of the home
-# $_[1]     Home folder location
-# $_[2]     Reference of previous home UID
-# $_[3]     Reference of previous home GID
-# $_[4]     Reference of future home UID
-# $_[5]     Reference of future home GID
-#
-#sub GetCurSituation($$$$$$)
-#{
-#    my ($user,$home_path,$prev_uid_ref,$prev_gid_ref,$new_uid_ref,$new_gid_ref) = @_;
-#    my $local_uid;
-#    my $local_gid;
-#    my $network_uid;
-#    my $network_gid;
-#
-#    ($$prev_uid_ref,$$prev_gid_ref) = (stat("$home_path"))[4,5];
-#    chomp($$new_uid_ref = `adquery user $user --attribute _Uid`);
-#    chomp($$new_gid_ref = `adquery user $user --attribute _Gid`);
-#
-#    
-#}
-
 # Detect if a user is a network user
 # if it's network user reutrn 1, else return 0
 #
@@ -107,12 +82,12 @@ sub ChangeID($$$)
 #to the system. It's exactly the opposite behavior compared with UNIX/LINUX.
 #When fixing home with the AD UID, it would cause local user couldn't login to the system.
 #So when in such situation, we need to tell customer the conflict account in darwin.
+#
+#  @_:      users
+#
 sub CheckAccountConflict
 {
-    my $local_uid;
-    my $local_gid;
-    my $new_uid;
-    my $new_gid;
+    my ($local_uid,$local_gid,$new_uid,$new_gid);
     my $found = 0;
 
     if($OSNAME ne "darwin")
@@ -167,10 +142,7 @@ sub CheckAccountConflict
 #
 sub FixMobileAccount
 {
-    my $local_uid;
-    my $local_gid;
-    my $net_uid;
-    my $net_gid;
+    my ($local_uid,$local_gid,$net_uid,$net_gid);
     my $found = 0;
 
     # This funciton is only used to fix the "different value return from 'id' and 'adquery user'"
@@ -201,8 +173,6 @@ sub FixMobileAccount
         #It is mobile user, now get its local UID/GID and network UID/GID
         chomp($local_uid = `dscl /Local/Default -read /Users/$user UniqueID`);
         chomp($local_gid = `dscl /Local/Default -read /Users/$user PrimaryGroupID`);
-        #chomp($net_uid = `adquery user $user --attribute _Uid 2> /dev/null`);
-        #chomp($net_gid = `adquery user $user --attribute _Gid 2> /dev/null`);
         $net_uid = $aduser_info{$user}[2];
         $net_gid = $aduser_info{$user}[3];
         $local_uid =~ s/UniqueID: //;
@@ -282,11 +252,7 @@ sub FilterUsers
 sub GetAllUsers()
 {
     my @all_user = ();
-    my $new_uid;
-    my $new_gid;
-    my $prev_uid;
-    my $prev_gid;
-    my $home_path;
+    my ($new_uid,$new_gid,$prev_uid,$prev_gid,$home_path);
     @localuser = ();
     @nouser = ();
     @nohome = ();
@@ -318,7 +284,6 @@ sub GetAllUsers()
             #initialize the uid hash table.
             ($prev_uid,$prev_gid) = (stat($home_path))[4,5];
             ($new_uid,$new_gid) = (@{$aduser_info{$user}})[2,3];
-            #GetCurSituation($user,$home_path,\$prev_uid,\$prev_gid,\$new_uid,\$new_gid);
             $uidmap{$prev_uid} = $new_uid if($prev_uid != $new_uid);
         }
     }
@@ -356,7 +321,6 @@ sub FixHome
         foreach my $user (@_)
         {
             $home_path = File::Spec->catfile($HomeRoot,$user);
-            #GetCurSituation($user,$home_path,\$prev_uid,\$prev_gid,\$new_uid,\$new_gid);
             ($prev_uid,$prev_gid) = (stat($home_path))[4,5];
             ($new_uid,$new_gid) = (@{$aduser_info{$user}})[2,3];
             if($new_uid == $prev_uid && $new_gid == $prev_gid)
@@ -381,7 +345,6 @@ sub FixHome
     {
         my @files;#Array to store all the files under the home directory
         $home_path = File::Spec->catfile($HomeRoot,$user);
-        #GetCurSituation($user,$home_path,\$prev_uid,\$prev_gid,\$new_uid,\$new_gid);
         ($prev_uid,$prev_gid) = (stat($home_path))[4,5];
         ($new_uid,$new_gid) = (@{$aduser_info{$user}})[2,3];
         #Home's mode is correct, don't need to be fixed.
@@ -470,7 +433,7 @@ GetOptions ('include=s' => \@include,
             'dir=s' => \$HomePath,
             'follow' => \$follow,
             'help' => \$help)
-or die();
+or Usage();
 @include = split(/,/,join(',',@include));
 @exclude = split(/,/,join(',',@exclude));
 
