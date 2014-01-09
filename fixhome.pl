@@ -49,7 +49,54 @@ sub IsADUser($)
     {
         return 0;
     }
+
+    
     return exists $aduser_info{$user};
+}
+
+# Detect if a user is a mobile user
+# if it's mobile user return 1, else return 0
+#
+# $_[0]: user's name
+# ret: 1 or 0
+sub IsMobileUser($)
+{
+    my $user = $_[0];
+    #Moblie User is only exist in Darwin
+    if($OSNAME ne "darwin")
+    {
+        return 0;
+    }
+
+    #First of all, Mobile User is an AD user.
+    if(! IsADUser($user))
+    {
+        return 0;
+    }
+
+    #Check if it's a mobile user
+    system "dscl /Local/Default -mcxread /Users/$user com.apple.MCX 2> /dev/null | grep com.apple.cachedaccounts.CreateAtLogin > /dev/null";
+    if($?!=0)
+    {
+        return 0;
+    }
+
+    #I don't think this is necessary, when it comes to mobile user who cross forest,
+    #code below would bring trouble.
+    #
+    #else
+    #{
+    #    chomp(my $ret = `dscl /Local/Default -read /Users/$user OriginalAuthenticationAuthority 2> /dev/null`);
+    #    $ret =~ s/OriginalAuthenticationAuthority: //;
+    #    if($ret ne "CentrifyDC")
+    #    {
+    #        print "$user is Not Mobile user because OriginalAuthenticationAuthority is $ret\n";
+    #        return 0;
+    #    }
+    #}
+
+    #Pass all the check, it is a mobile user
+    return 1;
 }
 
 # Change mobile user's uid/gid. This function is only for Darwin
@@ -78,6 +125,41 @@ sub ChangeID($$$)
     system "dscl /Local/Default -create /Users/$user PrimaryGroupID $gid";
 }
 
+# Obtain home folder name from the user's name, this function support UPN format username.
+# Usually, home folder name is same with user's name, unless user's name have one of these
+# character "/\[]:;|=,+*?<>@". These character would be instead by "_" in their folder name.
+# If the user is no AD user, function would return empty string.
+# 
+# $_[0]:    user'name
+# ret:      full path of user's home folder
+sub GetHomeName($)
+{
+    my $user = $_[0];
+    my $home_path;
+
+    #We're not concerned about the local user or non-exist user
+    if (! IsADUser($user))
+    {
+        return $home_path;
+    }
+
+    #For AD user
+    $home_path = $aduser_info{$user}[5];
+
+    #Not just a AD user, it's probably a mobile user
+    if($home_path =~ /^\/SMB\// or $home_path =~ /^\/AFP\//)
+    {
+        if(IsMobileUser($user))
+        {
+            chomp($home_path = `dscl /Local/Default -read /Users/$user NFSHomeDirectory`);
+            $home_path =~ s/NFSHomeDirectory: //;
+        }
+    }
+
+    return $home_path;
+}
+
+
 #In Mac, once if conflict account appear, only the local account could login 
 #to the system. It's exactly the opposite behavior compared with UNIX/LINUX.
 #When fixing home with the AD UID, it would cause local user couldn't login to the system.
@@ -95,7 +177,7 @@ sub CheckAccountConflict
         return;
     }
 
-    #turn @mobileuser to a map, so we could check if a user is mobile account quickly.
+    #turn array @mobileuser to a hash table %mobilemap, so we could check if a user is mobile account quickly.
     my %mobilemap = map {$_ => 1} @mobileuser;
 
     foreach my $user (@_)
@@ -154,20 +236,9 @@ sub FixMobileAccount
 
     foreach my $user (@_)
     {
-        #check if user is mobile user, if not skip it.
-        system "dscl /Local/Default -mcxread /Users/$user com.apple.MCX 2> /dev/null | grep com.apple.cachedaccounts.CreateAtLogin > /dev/null";
-        if($?!=0)
+        if(!IsMobileUser($user))
         {
             next;
-        }
-        else
-        {
-            chomp(my $ret = `dscl /Local/Default -read /Users/$user OriginalAuthenticationAuthority 2> /dev/null`);
-            $ret =~ s/OriginalAuthenticationAuthority: //;
-            if($ret ne "CentrifyDC")
-            {
-                next;
-            }
         }
 
         #It is mobile user, now get its local UID/GID and network UID/GID
@@ -221,7 +292,19 @@ sub FilterUsers
 
     foreach my $user (@_)
     {
-        my $home_path = File::Spec->catfile($HomeRoot,$user);
+        #Probably UPN, use adquery directly 
+        if($user =~ /@/)
+        {
+            my $result = `adquery user $user 2> /dev/null`;
+            if($? == 0)
+            {
+                my @data = split /:/,$result;
+                $user = $data[0];
+                $aduser_info{$user} = [@data];
+            }
+        }
+
+        my $home_path = GetHomeName($user);
         if(!defined getpwnam($user))
         {
             push(@nouser,$user);
@@ -265,7 +348,7 @@ sub GetAllUsers()
         }
 
         $user =~ s#^$HomeRoot/##;
-        $home_path = File::Spec->catfile($HomeRoot,$user);
+        $home_path = GetHomeName($user);
         chomp $home_path;
         chomp $user;
 
@@ -320,7 +403,7 @@ sub FixHome
     {
         foreach my $user (@_)
         {
-            $home_path = File::Spec->catfile($HomeRoot,$user);
+            $home_path = GetHomeName($user);
             ($prev_uid,$prev_gid) = (stat($home_path))[4,5];
             ($new_uid,$new_gid) = (@{$aduser_info{$user}})[2,3];
             if($new_uid == $prev_uid && $new_gid == $prev_gid)
@@ -344,7 +427,7 @@ sub FixHome
     foreach my $user (@_)
     {
         my @files;#Array to store all the files under the home directory
-        $home_path = File::Spec->catfile($HomeRoot,$user);
+        $home_path = GetHomeName($user);
         ($prev_uid,$prev_gid) = (stat($home_path))[4,5];
         ($new_uid,$new_gid) = (@{$aduser_info{$user}})[2,3];
         #Home's mode is correct, don't need to be fixed.
@@ -529,7 +612,7 @@ if(@include)
     {
         print "<Warning>\nUsers list below is local user, which would be skipped.\n\t".
               join("\n\t",@localuser)."\n".
-              "Only the Active Directory User's home folder could be fixed."
+              "Only the Active Directory User's home folder could be fixed.\n\n";
     }
     if(@nohome)
     {
