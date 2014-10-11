@@ -1,13 +1,32 @@
-#!/bin/sh /usr/share/centrifydc/perl/run
+#!/bin/sh /usr/share/centrifydc/perl/run -d
 use strict;
 use Getopt::Long;
 use File::Spec;
 use File::Find;
 use English qw( -no_match_vars );
 
-my %uidmap;         #The hash table, maps old uid to new uid
+use constant {
+    NAME    =>  0,
+    PASSWD  =>  1,
+    UID     =>  2,
+    GID     =>  3,
+    GECOS   =>  4,
+    HOME    =>  5,
+    SHELL   =>  6,
+};
+
+use constant {
+    RED     => "\033[0;40;31m",
+    GREEN   => "\033[0;40;92m",
+    PURPLE  => "\033[1;40;94m",
+    HIGHT   => "\033[1;40;39m",
+    CEND    => "\033[0m",
+};
+
 my %aduser_info;    #key is ad user's name, value is array which contains name, passwd,uid/gid,gecos,home path,and shell.
+my %uidmap;         #The hash table, maps old uid to new uid
 my @mobileuser;     #list of mobile user, mobile user is only exist in darwin, this array will be filled by subrotine FixMobileAccount
+my @conflictuser;   #list of conflict account
 my @localuser;      #list of local user, also the result container of FilterUsers, GetAllUsers
 my @nouser;         #list of non-exist user, and contain the result from FilterUsers, GetAllUsers
 my @nohome;         #list of user who don't have home directory, and contain the result from FilterUsers,GetAllUsers
@@ -44,14 +63,17 @@ sub Usage
 sub IsADUser($)
 {
     my $user = $_[0];
+
+    #avoid the empty user name for command "adquery user"
     $user =~ s/^\s*//;
     if($user eq "")
     {
         return 0;
     }
-
     
-    return exists $aduser_info{$user};
+    return 1 if exists $aduser_info{$user};
+    `adquery user $user > /dev/null 2>&1`;
+    return 1 if $? == 0;
 }
 
 # Detect if a user is a mobile user
@@ -75,25 +97,12 @@ sub IsMobileUser($)
     }
 
     #Check if it's a mobile user
-    system "dscl /Local/Default -mcxread /Users/$user com.apple.MCX 2> /dev/null | grep com.apple.cachedaccounts.CreateAtLogin > /dev/null";
+    system "dscl /Local/Default -read /Users/\"$user\" AuthenticationAuthority ".
+            " 2> /dev/null | grep LocalCachedUser > /dev/null";
     if($?!=0)
     {
         return 0;
     }
-
-    #I don't think this is necessary, when it comes to mobile user who cross forest,
-    #code below would bring trouble.
-    #
-    #else
-    #{
-    #    chomp(my $ret = `dscl /Local/Default -read /Users/$user OriginalAuthenticationAuthority 2> /dev/null`);
-    #    $ret =~ s/OriginalAuthenticationAuthority: //;
-    #    if($ret ne "CentrifyDC")
-    #    {
-    #        print "$user is Not Mobile user because OriginalAuthenticationAuthority is $ret\n";
-    #        return 0;
-    #    }
-    #}
 
     #Pass all the check, it is a mobile user
     return 1;
@@ -121,8 +130,8 @@ sub ChangeID($$$)
         return;
     }
 
-    system "dscl /Local/Default -create /Users/$user UniqueID $uid";
-    system "dscl /Local/Default -create /Users/$user PrimaryGroupID $gid";
+    system "dscl /Local/Default -create /Users/\"$user\" UniqueID $uid";
+    system "dscl /Local/Default -create /Users/\"$user\" PrimaryGroupID $gid";
 }
 
 # Obtain home folder name from the user's name, this function support UPN format username.
@@ -144,73 +153,45 @@ sub GetHomeName($)
     }
 
     #For AD user
-    $home_path = $aduser_info{$user}[5];
+    $home_path = $aduser_info{$user}[HOME];
 
-    #Not just a AD user, it's probably a mobile user
-    if($home_path =~ /^\/SMB\// or $home_path =~ /^\/AFP\//)
+    if(IsMobileUser($user))
     {
-        if(IsMobileUser($user))
-        {
-            chomp($home_path = `dscl /Local/Default -read /Users/$user NFSHomeDirectory`);
-            $home_path =~ s/NFSHomeDirectory: //;
-        }
+        chomp($home_path = `dscl /Local/Default -read /Users/"$user" NFSHomeDirectory`);
+        $home_path =~ s/NFSHomeDirectory: //;
     }
 
     return $home_path;
 }
 
-
-#In Mac, once if conflict account appear, only the local account could login 
-#to the system. It's exactly the opposite behavior compared with UNIX/LINUX.
-#When fixing home with the AD UID, it would cause local user couldn't login to the system.
-#So when in such situation, we need to tell customer the conflict account in darwin.
 #
-#  @_:      users
-#
-sub CheckAccountConflict
+# $_[0]: user's name
+# ret:   if user is not conflict account return 0, else return 1;
+sub IsConflictUser($)
 {
-    my ($local_uid,$local_gid,$new_uid,$new_gid);
-    my $found = 0;
-
-    if($OSNAME ne "darwin")
+    my $user = $_[0];
+    my ($local_uid, $local_gid, $net_uid, $net_gid);
+    if(!IsMobileUser($user))
     {
-        return;
-    }
-
-    #turn array @mobileuser to a hash table %mobilemap, so we could check if a user is mobile account quickly.
-    my %mobilemap = map {$_ => 1} @mobileuser;
-
-    foreach my $user (@_)
-    {
-        #skip the mobile user account.
-        if(exists $mobilemap{$user})
-        {
-            next;
-        }
-
-        system "dscl /Local/Default -read /Users/$user UniqueID > /dev/null 2>&1";
+        system "dscl /Local/Default -read /Users/\"$user\" UniqueID > /dev/null 2>&1";
         if($? == 0)
         {
-            chomp($local_uid = `dscl /Local/Default -read /Users/$user UniqueID`);
-            chomp($local_gid = `dscl /Local/Default -read /Users/$user PrimaryGroupID`);
+            #Get user's local UID/GID and network UID/GID
+            chomp($local_uid = `dscl /Local/Default -read /Users/"$user" UniqueID`);
+            chomp($local_gid = `dscl /Local/Default -read /Users/"$user" PrimaryGroupID`);
             $local_uid=~ s/^UniqueID: //;
             $local_gid=~ s/^PrimaryGroupID: //;
-            ($new_uid,$new_gid) = @{$aduser_info{$user}}[2,3];
+
+            ($net_uid,$net_gid) = @{$aduser_info{$user}}[UID,GID];
             
             #conflict account detected
-            if(($local_uid != $new_uid) || ($local_gid != $new_gid))
+            if(($local_uid != $net_uid) || ($local_gid != $net_gid))
             {
-                if($found == 0)
-                {
-                    $found = 1;
-                    print "Conflict account has been detected, this may cause problem for user login!\n";
-                    printf("%-10s %-10s %-10s %-10s %-10s %s\n",'Name','LocalUID','ZoneUID','LocalGID','ZoneGID','Home');
-                }
-                printf("%-10s %-10s %-10s %-10s %-10s %s\n",$user,$local_uid,$new_uid,$local_gid,$new_gid,$aduser_info{$user}[5]);
+                return 1;
             }
         }
     }
-    print("\n") if $found != 0 ;
+    return 0;
 }
 
 # In Mac, mobile user have a network UID/GID and a local UID/GID, normally they should
@@ -225,10 +206,8 @@ sub CheckAccountConflict
 sub FixMobileAccount
 {
     my ($local_uid,$local_gid,$net_uid,$net_gid);
-    my $found = 0;
+    my $found = 0; #flag set to 1, when there's mobile account need to be fixed.
 
-    # This funciton is only used to fix the "different value return from 'id' and 'adquery user'"
-    # problem, this problem only happen on Mac when use mobile user account.
     if($OSNAME ne "darwin")
     {
         return;
@@ -241,35 +220,35 @@ sub FixMobileAccount
             next;
         }
 
-        #It is mobile user, now get its local UID/GID and network UID/GID
-        chomp($local_uid = `dscl /Local/Default -read /Users/$user UniqueID`);
-        chomp($local_gid = `dscl /Local/Default -read /Users/$user PrimaryGroupID`);
-        $net_uid = $aduser_info{$user}[2];
-        $net_gid = $aduser_info{$user}[3];
+        #Confirm that it's a mobile user, now get its local UID/GID and network UID/GID
+        chomp($local_uid = `dscl /Local/Default -read /Users/"$user" UniqueID`);
+        chomp($local_gid = `dscl /Local/Default -read /Users/"$user" PrimaryGroupID`);
+        $net_uid = $aduser_info{$user}[UID];
+        $net_gid = $aduser_info{$user}[GID];
         $local_uid =~ s/UniqueID: //;
         $local_gid =~ s/PrimaryGroupID: //;
 
         if(($local_uid != $net_uid) || ($local_gid != $net_gid))
         {
-            if($test)
+            if($found == 0)
             {
-                if($found == 0)
-                {
-                    $found = 1;
-                    printf("%-20s %-20s %-10s %-8s %-12s %-12s\n",'LocalUID(Name/Map)','ZoneUID(Name/Map)','LocalGID','ZoneGID','Resolution','ID Map');
-                }
-                printf("%-20s %-20s %-10s %-8s %-12s %-12s\n", $local_uid."($user)",$net_uid."($user)",
-                $local_gid,$net_gid,'Use Zone ID',$net_uid);
+                print PURPLE."#Mobile users are listed below, these users' local UID/GID\n".
+                      "#would be changed to their network UID/GID\n".CEND;
+                printf(HIGHT."%-20s %-20s %-10s %-8s %-12s %-12s\n".CEND,
+                    'LocalUID(Name/Map)','ZoneUID(Name/Map)','LocalGID','ZoneGID','Resolution','ID Map');
+                $found = 1;
             }
-            else
+            printf("%-20s %-20s %-10s %-8s %-12s %-12s\n", 
+                    $local_uid."($user)",$net_uid."($user)",$local_gid,$net_gid,'Use Zone ID',$net_uid);
+
+            if(!$test)
             {
                 ChangeID($user, $net_uid, $net_gid);
             }
-            push @mobileuser, $user;
         }
     }
 
-    if($test && $found != 0)
+    if($test && scalar(@_) != 0)
     {
         print "\n";
     }
@@ -279,6 +258,8 @@ sub FixMobileAccount
 # validate specified users, and filter out the illegal users.
 # illegal users would be classified by errors (User not exist, Home not exist)
 # and would be placed into @nouser or @nohome respectively.
+# local user and conflict user would be put into array @localuser and @conflictuser
+# script would skip the local user and conflict user.
 #
 #   @_:     users
 #   ret:    sorted legal user array
@@ -287,70 +268,33 @@ sub FilterUsers
 {
     @localuser = ();
     @nouser    = ();
+    @conflictuser = ();
     @nohome    = ();
+    @mobileuser = ();
+
     my @legal_user = ();
+    my ($new_uid,$new_gid,$prev_uid,$prev_gid,$home_path);
+    my ($local_uid,$local_gid,$net_uid,$net_gid);
 
     foreach my $user (@_)
     {
-        #Probably UPN, use adquery directly 
+        #Bug 58524 - Should support UPN format when run fixhome.pl to fix cross forest user's home owner
+        #Account with UPN(probably a cross froest user) may be overlooked at function GetAllUsers, 
+        #so update aduser_info for UPN is necessary.
         if($user =~ /@/)
         {
-            my $result = `adquery user $user 2> /dev/null`;
+            my $result = `adquery user "$user" 2> /dev/null`;
             if($? == 0)
             {
                 my @data = split /:/,$result;
                 $user = $data[0];
                 $aduser_info{$user} = [@data];
+                push(@legal_user, $user);
+                next;
             }
         }
 
-        my $home_path = GetHomeName($user);
-        if(!defined getpwnam($user))
-        {
-            push(@nouser,$user);
-        }
-        elsif(!IsADUser($user))
-        {
-            push(@localuser,$user);
-        }
-        elsif(! -d $home_path) #Home Prefix
-        {
-            push(@nohome,$user);
-        }
-        else
-        {
-            push(@legal_user,$user);
-        }
-    }
-    return sort @legal_user;
-}
-
-
-#
-# Get all the legal users whose home is under the directory $HomeRoot
-# it would also build uidmap for validated user. 
-#
-#   ret:    sorted legal user array.
-#
-sub GetAllUsers()
-{
-    my @all_user = ();
-    my ($new_uid,$new_gid,$prev_uid,$prev_gid,$home_path);
-    @localuser = ();
-    @nouser = ();
-    @nohome = ();
-
-    foreach my $user (glob("$HomeRoot/*"))
-    {
-        if(!-d $user)
-        {
-            next;
-        }
-
-        $user =~ s#^$HomeRoot/##;
         $home_path = GetHomeName($user);
-        chomp $home_path;
-        chomp $user;
 
         #script only fix AD user now, we'll skip those local user.
         if(!defined getpwnam($user))
@@ -361,14 +305,105 @@ sub GetAllUsers()
         {
             push(@localuser,$user);
         }
+        elsif(! -d $home_path) 
+        {
+            push(@nohome,$user);
+        }
+        elsif(IsConflictUser($user))
+        {
+            #Bug 59022 - Should not change local user's UID and GID when local user and AD user have a conflict
+            #When conflict accout appear, we should use adfixid to fix them first, it's not the job of fixhome.pl
+            push(@conflictuser, $user);
+        }
         else
         {
-            push(@all_user,$user);
-            #initialize the uid hash table.
-            ($prev_uid,$prev_gid) = (stat($home_path))[4,5];
-            ($new_uid,$new_gid) = (@{$aduser_info{$user}})[2,3];
-            $uidmap{$prev_uid} = $new_uid if($prev_uid != $new_uid);
+            if(IsMobileUser($user))
+            {
+                push(@mobileuser, $user);
+            }
+            push(@legal_user,$user);
         }
+    }
+
+    #initialize the uid hash table for legal user
+    foreach my $user (@legal_user)
+    {
+        ($prev_uid,$prev_gid) = (stat($home_path))[4,5];
+        ($new_uid,$new_gid) = (@{$aduser_info{$user}})[UID,GID];
+        $uidmap{$prev_uid} = $new_uid if($prev_uid != $new_uid);
+    }
+
+    #Display the warning message
+    if(@nouser)
+    {
+        print "Nonexistent users:\n   (homes of below users would be skipped during fixing)\n\t".
+              RED.join("\n\t",@nouser)."\n\n".CEND;
+    }
+    if(@localuser)
+    {
+        print "Local users:\n   (homes of below users would be skipped during fixing)\n\t".
+              RED.join("\n\t",@localuser)."\n\n".CEND;
+    }
+    if(@nohome)
+    {
+        print "Homeless users:\n   (homes of below user cannot be found under the $HomeRoot)\n".
+              "   (try to use \"-D\" option to specify Home Root Folder, otherwise they would be skipped)\n\t".
+              RED.join("\n\t",@nohome)."\n\n".CEND;
+    }
+    if(@conflictuser)
+    {
+        print PURPLE."#Conlict users are listed below, please use \"adfixid\" or\n".
+              "#Account Migration Tool(only exsit on Mac OS X) to fix these \n".
+              "#accounts first, otherwise they would be skipped during fixing\n".CEND;
+
+        printf(HIGHT."%-10s %-10s %-10s %-10s %-10s %s\n".CEND,
+            'Name','LocalUID','ZoneUID','LocalGID','ZoneGID','Home');
+
+        foreach my $user (@conflictuser)
+        {
+            #Get user's local UID/GID and network UID/GID
+            chomp($local_uid = `dscl /Local/Default -read /Users/"$user" UniqueID`);
+            chomp($local_gid = `dscl /Local/Default -read /Users/"$user" PrimaryGroupID`);
+            $local_uid=~ s/^UniqueID: //;
+            $local_gid=~ s/^PrimaryGroupID: //;
+            ($net_uid,$net_gid) = @{$aduser_info{$user}}[UID,GID];
+
+            printf("\033[0;40;31m%-10s %-10s %-10s %-10s %-10s %s\n\033[0m",
+                $user,$local_uid,$net_uid,$local_gid,$net_gid,$aduser_info{$user}[HOME]);
+        }
+        print "\n";
+    }
+
+    return sort @legal_user;
+}
+
+#
+# Get all the legal users whose home is under the directory $HomeRoot
+# This function would initialize the aduser_info map. 
+#
+#   ret:    sorted legal user array.
+#
+sub GetAllUsers()
+{
+    my @all_user = ();
+
+    foreach my $user (glob("$HomeRoot/*"))
+    {
+        if(!-d $user)
+        {
+            next;
+        }
+
+        $user =~ s#^$HomeRoot/##;
+        my $adquery_result = `adquery user "$user" 2> /dev/null`;
+        if ($? == 0)
+        {
+            chomp $adquery_result;
+            my @data = split (/:/, $adquery_result );
+            $aduser_info{$data[NAME]} = [@data];
+        }
+        chomp $user;
+        push (@all_user, $user);
     }
     return sort @all_user;
 }
@@ -392,44 +427,41 @@ sub FixHome
     # Fix the mobile user's account, make their local UID/GID same with their network one.
     # Mobile account only exist in Mac. For other platform, This function
     # would be automatically skipped.
-    FixMobileAccount(@_);
-
-    #Before call this funciton, need to make sure there's no Moblie user in the list, to
-    #avoid false alarm of conflict account.
-    CheckAccountConflict(@_);
+    FixMobileAccount(@mobileuser);
 
     #Display the uid map
-    if($test)
+    foreach my $user (@_)
     {
-        foreach my $user (@_)
+        $home_path = GetHomeName($user);
+        ($prev_uid,$prev_gid) = (stat($home_path))[4,5];
+        ($new_uid,$new_gid) = (@{$aduser_info{$user}})[UID,GID];
+        if($new_uid == $prev_uid && $new_gid == $prev_gid)
         {
-            $home_path = GetHomeName($user);
-            ($prev_uid,$prev_gid) = (stat($home_path))[4,5];
-            ($new_uid,$new_gid) = (@{$aduser_info{$user}})[2,3];
-            if($new_uid == $prev_uid && $new_gid == $prev_gid)
-            {
-                next;
-            }
-            if($found == 0)
-            {
-                $found = 1;
-                printf("%-11s %-18s %-30s %-30s\n",'User','Home','UID Map','GID Map');
-            }
-            printf("%-11s %-18s ",$user,$home_path);
-            printf("%-30s ",$prev_uid.'=>'.$new_uid);
-            printf("%-30s",$prev_gid.'=>'.$new_gid) unless($uidonly);
-            print "\n";
+            next;
         }
-        print "\n" if $found != 0;
-        return;
+        if($found == 0)
+        {
+            $found = 1;
+            print PURPLE."#AD user's home folder would be fixed as below\n".CEND;
+            printf(HIGHT."%-11s %-18s %-30s %-30s\n".CEND,'User','Home','UID Map','GID Map');
+        }
+        printf("%-11s %-18s ",$user,$home_path);
+        printf("%-30s ",$prev_uid.'=>'.$new_uid);
+        printf("%-30s",$prev_gid.'=>'.$new_gid) unless($uidonly);
+        print "\n";
     }
+    print "\n" if $found != 0;
 
+    #if user specify -t option, we shall not commit any change, return immediately.
+    return if $test;
+
+    #begin to execute the fix follows the uid map 
     foreach my $user (@_)
     {
         my @files;#Array to store all the files under the home directory
         $home_path = GetHomeName($user);
         ($prev_uid,$prev_gid) = (stat($home_path))[4,5];
-        ($new_uid,$new_gid) = (@{$aduser_info{$user}})[2,3];
+        ($new_uid,$new_gid) = (@{$aduser_info{$user}})[UID,GID];
         #Home's mode is correct, don't need to be fixed.
         if($new_uid == $prev_uid && $new_gid == $prev_gid)
         {
@@ -443,7 +475,7 @@ sub FixHome
         #Search every files under the home, and keep them in array @files
         find(\%options,$home_path);
         FixFiles($new_uid,$new_gid,$prev_uid,$prev_gid,\@files);
-        print "$user done.\n";
+        print GREEN."$user done.\n".CEND;
     }
 }
 
@@ -535,7 +567,7 @@ if ($> != 0)
 # Detect the running platform and initilize
 if($test)
 {
-    print "Your OS: $OSNAME\n";
+    print "Platform: $OSNAME\n";
 }
 
 if($OSNAME eq "darwin")
@@ -579,83 +611,20 @@ if(@include && @exclude)
     Usage();
 }
 
-# initialize the aduser_info hash table.
-# username: $aduser_info{"xxx"}[0]
-# passwd:   $aduser_info{"xxx"}[1]
-# uid:      $aduser_info{"xxx"}[2]
-# gid:      $aduser_info{"xxx"}[3]
-# gecos:    $aduser_info{"xxx"}[4]
-# home:     $aduser_info{"xxx"}[5]
-# shell:    $aduser_info{"xxx"}[6]
-my @adquery_result = `adquery user`;
-for (@adquery_result)
-{
-    chomp;
-    my @data = split/:/;
-    $aduser_info{$data[0]} = [@data];
-}
+#get all the user we expect to fix, and initialize aduser_info map
+my @alltargets = GetAllUsers();
 
 if(@include)
 {
-    #initilize the the uidmap;
-    GetAllUsers();
-
-    #validate included users
+    #validate included users, FilterUser would update the aduser_info map for UPN
     my @targets = FilterUsers(@include);
-    if(@nouser)
-    {
-        print "<Warning>\nUsers list below DO NOT exist.\n\t".
-              join("\n\t",@nouser)."\n".
-              "Please check if the user names are entered correctly,and make sure it is Active Directory User\n\n";
-    }
-    if(@localuser)
-    {
-        print "<Warning>\nUsers list below is local user, which would be skipped.\n\t".
-              join("\n\t",@localuser)."\n".
-              "Only the Active Directory User's home folder could be fixed.\n\n";
-    }
-    if(@nohome)
-    {
-        print "<Warning>\nUsers list below did not have their home directories found under $HomeRoot.\n\t".
-              join("\n\t",@nohome)."\n ".
-              "These users will be skipped.\n\n";
-    }
-
-    #fix the directory
     FixHome(@targets);
 }
 elsif(@exclude)
 {
-    #get all the legal user whose home could be fixed
-    my @alltargets = GetAllUsers();
-
-    #exclude those home which belong to excluded user
-    foreach my $user (@exclude)
-    {
-        @nouser = grep !/$user/,@nouser;
-    }
-    if(@nouser)
-    {
-        print "<Warning>\nOwners of the home directories list below were not found in the domain.\n\t".
-              join("\n\t",@nouser)."\nThese home directories will be skipped.\n\n";
-    }
-
-    #get exclude users and validate whether it is legal
-    my @extarget = FilterUsers(@exclude);
-    if(@nouser)
-    {
-        print "<Warning>\nUsers which you specify below DO NOT exist.\n\t".
-              join("\n\t",@nouser)."\nPlease check if the user names are entered correctly.\n\n ";
-    }
-    if(@nohome)
-    {
-        print "<Warning>\nUsers list below did not have their home directories found under $HomeRoot.\n\t".
-              join("\n\t",@nohome)."\n".
-              "Please check if the user names are entered correctly.\n\n";
-    }
-
     #Calculate the Home need to be fixed and fix them all
     #the @alltargets and @extarget below has to be sorted
+    my @extarget = sort @exclude;
     my @targets = ();
     my $i = 0;
     my $j = 0;
@@ -682,18 +651,19 @@ elsif(@exclude)
         push(@targets,$alltargets[$i]);
         $i++;
     }
-
+    
+    @targets = FilterUsers(@targets);
     FixHome(@targets);
 }
 else
 {
-    my @targets = GetAllUsers();
+    my @targets = FilterUsers(@alltargets);
     FixHome(@targets);
 }
 
 if($test)
 {
-    print "fixhome.pl input (or default) options:\n";
+    print "Input (or default) options:\n";
     print "User included        (-i): ",join(',',@include),"\n";
     print "User excluded        (-e): ",join(',',@exclude),"\n";
     print "Follow option        (-f): ";
