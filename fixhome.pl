@@ -17,10 +17,10 @@ use constant {
 };
 
 use constant {
-    RED     => "\033[0;40;31m",
-    GREEN   => "\033[0;40;92m",
-    PURPLE  => "\033[1;40;94m",
-    HIGHT   => "\033[1;40;39m",
+    RED     => "\033[0;49;31m",
+    GREEN   => "\033[0;49;92m",
+    PURPLE  => "\033[1;49;94m",
+    HIGHT   => "\033[1;49;39m",
     CEND    => "\033[0m",
 };
 
@@ -28,6 +28,8 @@ use constant {
 my %aduser_info;
 
 #Global hash table contains mapping relationship between former UID and current UID
+#The hash table is majorly for fixing files owned by other AD user, like files under the Public folder
+#or Share folder in someone's home directory
 my %uidmap;         
 
 #user type classified by function "FilterUser", they're mobile user, conflict user
@@ -36,6 +38,7 @@ my %uidmap;
 my @mobileuser;
 my @conflictuser;
 my @localuser;
+my @unknownuser;    #users who are neither AD user nor local user, probably cross-forest user
 my @nouser;         #in-existent users
 my @nohome;         #homeless users
 
@@ -88,7 +91,6 @@ sub IsADUser($)
     {
         #New AD user is found, update "aduser_info"
         my @data = split /:/,$result;
-        $user = $data[0];
         $aduser_info{$user} = [@data];
         return 1;
     }
@@ -106,9 +108,16 @@ sub IsADUser($)
 sub IsLocalUser($)
 {
     my $user = $_[0];
-    `dscl /Local/Default -read /Users/\"$user\" UniqueID > /dev/null 2>&1`;
-    return 1 if($? == 0);
-    return 0;
+    if($OSNAME eq "darwin")
+    {
+        `dscl /Local/Default -read /Users/\"$user\" UniqueID > /dev/null 2>&1`;
+        $? == 0?return 1: return 0;
+    }
+    else
+    {
+        `cat /etc/passwd | grep "^$user:" > /dev/null 2>&1`;
+        $? == 0?return 1: return 0;
+    }
 }
 
 # Check whether a user is  mobile user or not
@@ -158,10 +167,19 @@ sub GetUGID($)
 
     if(IsLocalUser($user))
     {
-        chomp($local_uid = `dscl /Local/Default -read /Users/"$user" UniqueID`);
-        chomp($local_gid = `dscl /Local/Default -read /Users/"$user" PrimaryGroupID`);
-        $local_uid=~ s/^UniqueID: //;
-        $local_gid=~ s/^PrimaryGroupID: //;
+        if($OSNAME eq "darwin")
+        {
+            chomp($local_uid = `dscl /Local/Default -read /Users/"$user" UniqueID`);
+            chomp($local_gid = `dscl /Local/Default -read /Users/"$user" PrimaryGroupID`);
+            $local_uid=~ s/^UniqueID: //;
+            $local_gid=~ s/^PrimaryGroupID: //;
+        }
+        else
+        {
+            my @record = split(/:/, `cat /etc/passwd | grep "^$user:"`);
+            $local_uid = $record[UID];
+            $local_gid = $record[GID];
+        }
     }
 
     if ( IsADUser($user) )
@@ -205,7 +223,7 @@ sub ChangeMobileAccountID($$$)
 #
 # Usually, home folder name is same with user's name, unless user's name have one of these
 # character "/\[]:;|=,+*?<>@". These character would be instead by "_" in their folder name.
-# If the user is no AD user, function would return empty string.
+# If the user is not AD user, function would return empty string.
 # 
 # $_[0]:    user'name
 # ret:      full path of user's home folder
@@ -331,32 +349,25 @@ sub FilterUsers
 
     foreach my $user (@_)
     {
-        #Bug 58524 - Should support UPN format when run fixhome.pl to fix cross forest user's home owner
-        #Account with UPN(probably a cross froest user) may be overlooked at function GetAllUsers, 
-        #so update aduser_info for UPN is necessary.
-        if($user =~ /@/)
-        {
-            my $result = `adquery user "$user" 2> /dev/null`;
-            if($? == 0)
-            {
-                my @data = split /:/,$result;
-                $user = $data[0];
-                $aduser_info{$user} = [@data];
-                push(@legal_user, $user);
-                next;
-            }
-        }
-
+        
         $home_path = GetHomeName($user);
 
         #script only fix AD user now, we'll skip those local user.
-        if(!defined getpwnam($user))
+        `id $user > /dev/null 2>&1`;
+        if($? != 0)
         {
             push(@nouser,$user);
         }
         elsif(!IsADUser($user))
         {
-            push(@localuser,$user);
+            if (IsLocalUser($user))
+            {
+                push(@localuser,$user);
+            }
+            else
+            {
+                push(@unknownuser, $user);
+            }
         }
         elsif(! -d $home_path) 
         {
@@ -386,13 +397,24 @@ sub FilterUsers
     #Display the warning message for those user we won't fix
     if(@nouser)
     {
-        print "Nonexistent users:\n   (homes of below users would be skipped during fixing)\n\t".
+        print "Nonexistent users:\n".
+              "   (homes of below users would be skipped during fixing. Cross-forest user \n".
+              "might be wrongly taken as inexistent user, please use \"sudo ./fixhome.pl -i <UPN>\"\n".
+              "to fix them. UPN, a.k.a the Universal Principal Name)\n\t".
               RED.join("\n\t",@nouser)."\n\n".CEND;
     }
     if(@localuser)
     {
         print "Local users:\n   (homes of below users would be skipped during fixing)\n\t".
               RED.join("\n\t",@localuser)."\n\n".CEND;
+    }
+    if(@unknownuser)
+    {
+        print "Unknown users:\n".
+              "   (users below are neither AD user nor local user. Their home will be skipped at fixing.\n".
+              "They might be cross-forest user, use \"sudo ./fixhome.pl -i <UPN>\" to fix them, UPN, \n".
+              "a.k.a the Universal Principal Name)\n\t".
+              RED.join("\n\t", @unknownuser)."\n\n".CEND;
     }
     if(@nohome)
     {
@@ -422,7 +444,7 @@ sub FilterUsers
 }
 
 #
-# Get all the legal users whose home is under the directory $HomeRoot
+# Get all the users whose home is under the directory $HomeRoot
 # This function would initialize the aduser_info map. 
 #
 #   ret:    sorted legal user array.
@@ -465,6 +487,7 @@ sub FixHome
     my $prev_uid;   #user's previous uid, assume it's the same with user's home uid
     my $prev_gid;   #user's previous gid, assume it's the same with user's home gid
     my $home_path;
+    my $user_name;
     my $found = 0;
    
     # Fix the mobile user's account, make their local UID/GID same with their network one.
@@ -489,7 +512,8 @@ sub FixHome
             print PURPLE."###   Table of Home Fixing Strategies   ###\n".CEND;
             printf(HIGHT."%-11s %-18s %-30s %-30s\n".CEND,'User','Home','UID Map','GID Map');
         }
-        printf("%-11s %-18s ",$user,$home_path);
+        $user_name = (@{$aduser_info{$user}})[NAME];
+        printf("%-11s %-18s ",$user_name,$home_path);
         printf("%-30s ",$prev_uid.'=>'.$new_uid);
         printf("%-30s",$prev_gid.'=>'.$new_gid) unless($uidonly);
         print "\n";
@@ -662,6 +686,22 @@ my @alltargets = GetAllUsers();
 
 if(@include)
 {
+    #Bug 58524 - Should support UPN format when run fixhome.pl to fix cross forest user's home owner
+    #Account with UPN(probably a cross froest user) may be overlooked at function GetAllUsers, 
+    #so update aduser_info for UPN is necessary.
+    for my $user (@include)
+    {
+        if($user =~ /@/)
+        {
+            my $result = `adquery user "$user" 2> /dev/null`;
+            if($? == 0)
+            {
+                my @data = split /:/,$result;
+                $aduser_info{$user} = [@data];
+            }
+        }
+    }
+
     #validate included users, FilterUser would update the aduser_info map for UPN
     my @targets = FilterUsers(@include);
     FixHome(@targets);
